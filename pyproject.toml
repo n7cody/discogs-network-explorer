@@ -1,0 +1,28 @@
+[project]
+name = "discogs-network-explorer"
+version = "0.2.0"
+description = "Explore labels and artists on Discogs with interactive filters and network graphs"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+dependencies = [
+    "requests>=2.31.0",
+    "pandas>=2.0.0",
+    "matplotlib>=3.7.0",
+    "networkx>=3.1",
+    "streamlit>=1.36.0",
+    "requests-cache>=1.2.0",
+    "python-dotenv>=1.0.0",
+    "openpyxl>=3.1.0",
+]
+
+[project.scripts]
+dne = "discogs_network_explorer.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

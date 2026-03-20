@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+
+# OS
+.DS_Store
+
+# Streamlit (keep config.toml; exclude secrets)
+.streamlit/secrets.toml
+
+# HTTP cache
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Outputs
+dne_outputs/
+
+# Project notes / session files (not part of the app)
+changes.txt
+session_notes.md
+*.png
+
+# Editor
+.idea/
+.vscode/
+*.swp

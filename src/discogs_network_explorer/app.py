@@ -47,6 +47,7 @@ from discogs_network_explorer.backend import (
     clear_http_cache,
     enable_http_cache,
     get_artist_name,
+    get_label_latest_year,
     get_label_name,
     get_master_artist_list,
     get_master_label_rows,
@@ -559,23 +560,6 @@ if min_releases_per_label > 0:
 if min_releases_per_artist > 0:
     df = filter_by_min_artist_releases(df, min_releases=min_releases_per_artist)
 
-# Release Activity Window.
-if activity_window_on and not df.empty:
-    df = filter_labels_by_activity_window(
-        df,
-        window_start=activity_window_start,
-        window_end=activity_window_end,
-        min_releases_in_window=activity_min_releases,
-    )
-    # Apply the same window to artists when seeds include explicit artist IDs.
-    if _seed_mode_used in {"Artists Only", "Labels + Artists"}:
-        df = filter_artists_by_activity_window(
-            df,
-            window_start=activity_window_start,
-            window_end=activity_window_end,
-            min_releases_in_window=activity_min_releases,
-        )
-
 # Narrow-down multiselect filters (empty = no restriction).
 if selected_formats:
     df = filter_by_format(df, set(selected_formats))
@@ -588,13 +572,16 @@ if selected_genres:
 if selected_styles:
     df = filter_by_styles(df, set(selected_styles))
 
-# Mode-specific overlap filter (uses mode and seeds from the last crawl).
+# Mode-specific overlap filter — run BEFORE activity window so that
+# relevant labels aren't prematurely dropped.  The activity window
+# then checks surviving labels via the API (one cached call each).
 if _seed_mode_used == "Labels Only":
     df = apply_label_only_mode(
         df,
         seed_label_ids=_seed_labels_used,
         min_overlaps_required=min_overlaps_required,
         strict_per_label=strict_per_label,
+        seed_artist_pool=_artists,
     )
 elif _seed_mode_used == "Labels + Artists":
     df = apply_label_plus_artist_mode(
@@ -608,6 +595,32 @@ elif _seed_mode_used == "Artists Only":
         seed_artist_ids=_seed_artists_used,
         min_overlaps_required=artist_min_overlaps,
     )
+
+# Release Activity Window — applied after the overlap filter.
+# For labels that passed overlap, check their most recent release via
+# the API (one cached call per label) rather than relying only on the
+# crawled rows, which may not represent the label's full catalog.
+if activity_window_on and not df.empty:
+    seed_ids_set = {str(s) for s in (_seed_labels_used or [])}
+    surviving_labels = set(df["label_id"].astype(str).unique())
+    inactive_labels: set[str] = set()
+    for lid in surviving_labels:
+        if lid in seed_ids_set:
+            continue  # seed labels always kept
+        latest = get_label_latest_year(lid)
+        if latest is not None and latest < activity_window_start:
+            inactive_labels.add(lid)
+    if inactive_labels:
+        df = df[~df["label_id"].astype(str).isin(inactive_labels)].copy()
+
+    # Apply the same window to artists when seeds include explicit artist IDs.
+    if _seed_mode_used in {"Artists Only", "Labels + Artists"}:
+        df = filter_artists_by_activity_window(
+            df,
+            window_start=activity_window_start,
+            window_end=activity_window_end,
+            min_releases_in_window=activity_min_releases,
+        )
 
 if df.empty:
     st.warning(
@@ -653,22 +666,13 @@ def _build_excel_output(
         label_name, label_id, artists (comma-separated names of seed-pool
         artists on that label), overlap_pct (% of seed-pool artists present).
     """
-    # Build artist_id → artist_name from df_raw (covers all crawled artists).
+    # Build artist_id → canonical artist name via the API.
+    # Release-credit names vary per release (aliases, collaborations, etc.),
+    # so we always use the canonical name from /artists/{id}.  With HTTP
+    # caching enabled, each lookup is cached after the first call.
     artist_name_map: dict[str, str] = {}
-    for rec in df_raw.to_dict("records"):
-        aid  = str(rec.get("artist_id", "")).strip()
-        name = str(rec.get("artist_name", "")).strip()
-        # Skip placeholder names so a real name can overwrite them later.
-        if aid and name and not name.startswith("artist_"):
-            artist_name_map[aid] = name
-
-    # Resolve any remaining placeholder names (artist_<id>) via the API.
-    # These arise when an artist was discovered only through a VA tracklist —
-    # the crawl captures the ID but not the name.  With HTTP caching on, each
-    # lookup is cached after the first call, so subsequent exports are free.
     for aid in list(artists):
-        if aid not in artist_name_map:
-            artist_name_map[aid] = get_artist_name(aid)
+        artist_name_map[aid] = get_artist_name(aid)
 
     # ── Sheet 1 data ──────────────────────────────────────────────────────────
     seed_label_rows = [
@@ -704,7 +708,7 @@ def _build_excel_output(
             continue
         label_id_to_name.setdefault(lid, lname)
         if aid in artists:
-            l2a_names.setdefault(lid, {})[aid] = aname or artist_name_map.get(aid, f"artist_{aid}")
+            l2a_names.setdefault(lid, {})[aid] = artist_name_map.get(aid, aname or f"artist_{aid}")
 
     seed_count = len(artists) if artists else 1
     label_summary_rows = []

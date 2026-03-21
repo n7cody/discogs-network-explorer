@@ -241,6 +241,7 @@ def apply_label_only_mode(
     seed_label_ids: Iterable[str],
     min_overlaps_required: int = 2,
     strict_per_label: bool = False,
+    seed_artist_pool: set[str] | None = None,
 ) -> pd.DataFrame:
     """
     Filter to labels that share artists with the seed label union.
@@ -252,6 +253,13 @@ def apply_label_only_mode(
         Additionally require that for EVERY seed label S with artists,
         |artists(L) ∩ artists(S)| >= 1.  This ensures L has cross-label
         presence across all seed labels, not just one.
+
+    seed_artist_pool:
+        The authoritative Phase 1 artist set (all artists discovered from
+        seed labels).  Used as the union pool for the overlap check.  If
+        not provided, falls back to reconstructing from df rows on seed
+        labels (which can miss artists whose seed-label releases were not
+        crawled in Phase 2).
     """
     seed_label_ids = [str(x) for x in seed_label_ids if str(x).strip()]
     if not seed_label_ids or df.empty:
@@ -259,10 +267,20 @@ def apply_label_only_mode(
 
     l2a = _label_to_artists_from_df(df)
 
+    # Use the authoritative Phase 1 pool when available; otherwise
+    # reconstruct from whatever seed-label rows exist in the filtered df.
+    if seed_artist_pool:
+        union_pool = seed_artist_pool
+    else:
+        seed_pools_union: set[str] = set()
+        for lid in seed_label_ids:
+            seed_pools_union |= l2a.get(lid, set())
+        union_pool = seed_pools_union
+
+    # Per-seed-label pools for strict mode (still from df rows).
     seed_pools: dict[str, set[str]] = {
         lid: l2a.get(lid, set()) for lid in seed_label_ids
     }
-    union_pool: set[str] = set().union(*seed_pools.values())
 
     if not union_pool:
         return df

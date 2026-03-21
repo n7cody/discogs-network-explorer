@@ -288,6 +288,29 @@ def get_label_release_count(label_id: str) -> int:
         return 0
 
 
+def get_label_latest_year(label_id: str) -> int | None:
+    """
+    Return the year of the most recent release on a Discogs label.
+
+    Fetches a single release from /labels/{id}/releases sorted by year
+    descending.  Returns None on any API error or if no year is available.
+    """
+    try:
+        data = _safe_get(
+            f"{API_BASE}/labels/{label_id}/releases",
+            params={"per_page": 1, "page": 1,
+                    "sort": "year", "sort_order": "desc"},
+        )
+        releases = data.get("releases") or []
+        if releases:
+            year = releases[0].get("year")
+            if isinstance(year, int) and year > 0:
+                return year
+        return None
+    except Exception:
+        return None
+
+
 def get_release_details(release_id: str) -> dict:
     """
     Fetch full metadata for a single release.

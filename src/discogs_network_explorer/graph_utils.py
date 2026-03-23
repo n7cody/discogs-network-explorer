@@ -20,12 +20,38 @@ from __future__ import annotations
 
 import networkx as nx
 import matplotlib.pyplot as plt
-from matplotlib.colors import to_rgba_array
+import matplotlib.patches as mpatches
 
-PALETTE = [
-    "#003f5c", "#2f4b7c", "#665191", "#a05195",
-    "#d45087", "#f95d6a", "#ff7c43", "#ffa600",
+# Year-based color scale: maps year ranges to hex colors.
+# Order matters — checked top-to-bottom, first match wins.
+_YEAR_COLOR_SCALE: list[tuple[int, int, str]] = [
+    (2026, 2026, "#b150b0"),
+    (2025, 2025, "#9750b1"),
+    (2023, 2024, "#7750b1"),
+    (2022, 2022, "#5950b1"),
+    (2021, 2021, "#5064b1"),
+    (2020, 2020, "#5089b1"),
+    (2016, 2019, "#50aeb1"),
+    (2011, 2015, "#50b177"),
+    (2006, 2010, "#8bb150"),
+    (2000, 2005, "#a4b150"),
+    (1995, 1999, "#b1a050"),
+    (1990, 1994, "#b18e50"),
+    (1980, 1989, "#b17250"),
+    (   0, 1979, "#b15750"),
 ]
+
+_DEFAULT_YEAR_COLOR = "#888888"  # fallback when year is unknown
+
+
+def _year_to_color(year: int | None) -> str:
+    """Map a year to a hex color using the year color scale."""
+    if year is None:
+        return _DEFAULT_YEAR_COLOR
+    for lo, hi, color in _YEAR_COLOR_SCALE:
+        if lo <= year <= hi:
+            return color
+    return _DEFAULT_YEAR_COLOR
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -39,6 +65,7 @@ def build_label_label_graph(
     seed_label_ids: list[str] | None = None,
     seed_artist_union: set[str] | None = None,
     min_overlap_pct: float = 0.0,
+    label_years: dict[str, dict[str, int | None]] | None = None,
 ) -> nx.Graph:
     """
     Build a label-label graph where edges represent shared artist presence.
@@ -107,11 +134,14 @@ def build_label_label_graph(
         if not is_seed and overlap_pct < min_overlap_pct:
             continue  # exclude — do not add node or any edges to/from it
 
+        yrs = (label_years or {}).get(L, {})
         label_attrs[L] = {
-            "kind":        "label",
-            "display":     display,
-            "overlap_pct": overlap_pct,
-            "is_seed":     is_seed,
+            "kind":          "label",
+            "display":       display,
+            "overlap_pct":   overlap_pct,
+            "is_seed":       is_seed,
+            "earliest_year": yrs.get("earliest"),
+            "latest_year":   yrs.get("latest"),
         }
 
     # Second pass: add nodes, then edges only between labels that both passed.
@@ -203,18 +233,15 @@ def draw_graph_matplotlib(G: nx.Graph, ax: plt.Axes | None = None) -> None:
     artist_nodes = [n for n, d in G.nodes(data=True) if d.get("kind") == "artist"]
     label_nodes  = [n for n, d in G.nodes(data=True) if d.get("kind") == "label"]
 
-    # Convert hex strings to a reliable (N, 4) RGBA float array so matplotlib
-    # always treats each entry as an individual node color, never as a colormap.
-    label_colors = to_rgba_array([PALETTE[i % len(PALETTE)] for i in range(len(label_nodes))])
+    # Year-based coloring: fill = latest release year, outline = earliest year.
+    label_fill_colors = [
+        _year_to_color(G.nodes[n].get("latest_year")) for n in label_nodes
+    ]
+    label_edge_colors = [
+        _year_to_color(G.nodes[n].get("earliest_year")) for n in label_nodes
+    ]
 
     # Step-function node sizing based on seed-artist overlap percentage.
-    # Full size = 1200.  Tiers:
-    #   ≥50 % → 1200  (full)
-    #   25–50% →  800  (2/3)
-    #   10–25% →  300  (1/4)
-    #    5–10% →  150  (1/8)
-    #    2–5%  →   75  (1/16)
-    #    0–2%  →   38  (1/32)
     def _step_size(pct: float) -> float:
         if pct >= 0.50:
             return 1200.0
@@ -236,9 +263,34 @@ def draw_graph_matplotlib(G: nx.Graph, ax: plt.Axes | None = None) -> None:
     )
     nx.draw_networkx_nodes(
         G, pos, nodelist=label_nodes,
-        node_size=label_sizes, node_color=label_colors, ax=ax,
+        node_size=label_sizes, node_color=label_fill_colors,
+        edgecolors=label_edge_colors, linewidths=3.0, ax=ax,
     )
     nx.draw_networkx_edges(G, pos, alpha=0.3, ax=ax)
+
+    # Compact year-color legend in the bottom-left corner.
+    _legend_entries = []
+    for lo, hi, color in _YEAR_COLOR_SCALE:
+        lbl = str(lo) if lo == hi else (f"{lo}–{hi}" if lo > 0 else f"–{hi}")
+        _legend_entries.append(
+            mpatches.Patch(facecolor=color, edgecolor=color, label=lbl)
+        )
+    _legend_entries.append(
+        mpatches.Patch(facecolor=_DEFAULT_YEAR_COLOR,
+                       edgecolor=_DEFAULT_YEAR_COLOR, label="n/a")
+    )
+    leg = ax.legend(
+        handles=_legend_entries,
+        loc="center left",
+        fontsize=5,
+        framealpha=0.7,
+        handlelength=1.0,
+        handleheight=0.8,
+        borderpad=0.4,
+        labelspacing=0.25,
+        title="Year",
+        title_fontsize=6,
+    )
 
     # Always draw labels; reduce font size for larger graphs.
     n_nodes = G.number_of_nodes()

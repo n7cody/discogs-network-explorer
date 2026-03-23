@@ -311,6 +311,30 @@ def get_label_latest_year(label_id: str) -> int | None:
         return None
 
 
+def get_label_earliest_year(label_id: str) -> int | None:
+    """
+    Return the year of the earliest release on a Discogs label.
+
+    Fetches releases from /labels/{id}/releases sorted by year ascending.
+    Skips entries with year=0 (no year data on Discogs) and returns the
+    first valid year.  Returns None on any API error or if no year is
+    available.
+    """
+    try:
+        data = _safe_get(
+            f"{API_BASE}/labels/{label_id}/releases",
+            params={"per_page": 5, "page": 1,
+                    "sort": "year", "sort_order": "asc"},
+        )
+        for rel in data.get("releases") or []:
+            year = rel.get("year")
+            if isinstance(year, int) and year > 0:
+                return year
+        return None
+    except Exception:
+        return None
+
+
 def get_release_details(release_id: str) -> dict:
     """
     Fetch full metadata for a single release.

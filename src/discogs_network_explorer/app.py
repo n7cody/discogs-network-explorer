@@ -47,6 +47,7 @@ from discogs_network_explorer.backend import (
     clear_http_cache,
     enable_http_cache,
     get_artist_name,
+    get_label_earliest_year,
     get_label_latest_year,
     get_label_name,
     get_master_artist_list,
@@ -164,7 +165,7 @@ st.sidebar.subheader("Seed IDs")
 
 seed_labels_raw = st.sidebar.text_area(
     "Seed label IDs (comma or newline separated)",
-    "1798608,1390196",
+    "3661094,1390196",
 )
 seed_label_ids: list[str] = [
     s.strip()
@@ -622,6 +623,15 @@ if activity_window_on and not df.empty:
             min_releases_in_window=activity_min_releases,
         )
 
+# Collect earliest and latest release years for all surviving labels.
+# One cached API call each — used for graph coloring and Excel output.
+_label_years: dict[str, dict[str, int | None]] = {}
+for _lid in df["label_id"].astype(str).unique():
+    _label_years[_lid] = {
+        "earliest": get_label_earliest_year(_lid),
+        "latest":   get_label_latest_year(_lid),
+    }
+
 if df.empty:
     st.warning(
         "All rows were filtered out by the current settings. "
@@ -651,6 +661,7 @@ def _build_excel_output(
     seed_mode_used: str,
     label_names: dict[str, str],
     params: dict,
+    label_years: dict[str, dict[str, int | None]] | None = None,
 ) -> bytes:
     """
     Build a 3-sheet Excel workbook and return it as bytes.
@@ -722,11 +733,14 @@ def _build_excel_output(
         # Use set() to deduplicate names — different artist IDs can share
         # a name (e.g. two "Various" placeholders), causing repeats otherwise.
         artist_list = ", ".join(sorted(set(aid_map.values())))
+        yrs = (label_years or {}).get(lid, {})
         label_summary_rows.append({
-            "label_name":  label_id_to_name.get(lid, lid),
-            "label_id":    lid,
-            "artists":     artist_list,
-            "overlap_pct": overlap_pct,
+            "label_name":    label_id_to_name.get(lid, lid),
+            "label_id":      lid,
+            "artists":       artist_list,
+            "overlap_pct":   overlap_pct,
+            "earliest_year": yrs.get("earliest", ""),
+            "latest_year":   yrs.get("latest", ""),
         })
 
     # ── Write workbook ────────────────────────────────────────────────────────
@@ -857,6 +871,7 @@ with tab_results:
             seed_mode_used=_seed_mode_used,
             label_names=_label_names,
             params=_excel_params,
+            label_years=_label_years,
         )
         st.download_button(
             "Download results as Excel (.xlsx)",
@@ -909,6 +924,7 @@ with tab_graph:
             label_names=_label_names,
             seed_label_ids=_seed_ids,
             seed_artist_union=_artists,  # authoritative pool from Phase 1 crawl
+            label_years=_label_years,
         )
     else:
         G = build_artist_label_graph(
@@ -981,6 +997,7 @@ with tab_report:
                     label_names=_rep_label_names,
                     seed_label_ids=_rep_seed_ids,
                     seed_artist_union=_artists,
+                    label_years=_label_years,
                 )
             else:
                 _G = build_artist_label_graph(

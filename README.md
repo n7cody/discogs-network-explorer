@@ -1,5 +1,7 @@
 # Discogs Network Explorer
 
+![dne app screenshot](dne_app.png)
+
 A Streamlit app for exploring relationships between Discogs labels and artists. Crawls the Discogs API to discover which labels share rosters, visualises the network as an interactive graph, and exports results as a multi-sheet Excel report.
 
 ## Requirements

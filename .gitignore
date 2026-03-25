@@ -35,6 +35,7 @@ dne_outputs/
 changes.txt
 session_notes.md
 *.png
+!dne_app.png
 
 # Editor
 .idea/

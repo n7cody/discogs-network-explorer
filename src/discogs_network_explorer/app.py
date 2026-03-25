@@ -987,7 +987,8 @@ with tab_graph:
         )
 
     st.caption(
-        f"Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges."
+        f"Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges.  \n"
+        f"Node fill color = latest release year · Border color = earliest release year"
     )
 
 

@@ -1,4 +1,4 @@
-# Discogs Network Explorer
+# dne — Discogs Network Explorer
 
 ![dne app screenshot](dne_app.png)
 

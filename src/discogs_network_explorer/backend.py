@@ -344,28 +344,68 @@ def get_release_details(release_id: str) -> dict:
     releases endpoint.
 
     Returns a dict with keys:
-        labels  — list of {"id": str, "name": str}
-        genres  — comma-separated genre string, e.g. "Electronic"
-        styles  — comma-separated style string, e.g. "Deep House, Techno"
-        country — country string, e.g. "UK"
-        year    — int or None
+        labels    — list of {"id": str, "name": str}
+        genres    — comma-separated genre string, e.g. "Electronic"
+        styles    — comma-separated style string, e.g. "Deep House, Techno"
+        country   — country string, e.g. "UK"
+        year      — int or None
+        videos    — list of {"url": str, "title": str} (YouTube links from
+                    the Discogs release page, community-curated)
+        tracklist — list of {"position": str, "title": str, "artist": str}
+                    per-track entries with individual artist names resolved
     """
     data = _safe_get(f"{API_BASE}/releases/{release_id}")
 
     labels: list[dict] = []
     for lab in (data.get("labels") or []):
-        lid = str(lab.get("id", "")).strip()
+        raw_id = lab.get("id")
+        if raw_id is None:
+            continue
+        lid = str(raw_id).strip()
         if lid:
             labels.append({"id": lid, "name": lab.get("name") or "Unknown"})
 
     year = data.get("year")
 
+    videos: list[dict] = []
+    for vid in (data.get("videos") or []):
+        uri = (vid.get("uri") or "").strip()
+        if "youtube.com/watch" in uri or "youtu.be/" in uri:
+            videos.append({"url": uri, "title": vid.get("title") or ""})
+
+    # Build per-track artist + title list for search fallback.
+    tracklist: list[dict] = []
+    # Top-level artist names (used as fallback when tracks lack per-track artists).
+    top_artists = [
+        a.get("name", "")
+        for a in (data.get("artists") or [])
+        if (a.get("name") or "").strip().lower() not in {"various", "various artists"}
+    ]
+    top_artist_str = ", ".join(top_artists) if top_artists else ""
+    for track in (data.get("tracklist") or []):
+        track_title = (track.get("title") or "").strip()
+        if not track_title:
+            continue
+        track_artists = [
+            a.get("name", "")
+            for a in (track.get("artists") or [])
+            if (a.get("name") or "").strip().lower() not in {"various", "various artists"}
+        ]
+        artist_str = ", ".join(track_artists) if track_artists else top_artist_str
+        tracklist.append({
+            "position": track.get("position") or "",
+            "title":    track_title,
+            "artist":   artist_str,
+        })
+
     return {
-        "labels":  labels,
-        "genres":  ", ".join(data.get("genres") or []),
-        "styles":  ", ".join(data.get("styles") or []),
-        "country": data.get("country") or "",
-        "year":    int(year) if isinstance(year, int) else None,
+        "labels":    labels,
+        "genres":    ", ".join(data.get("genres") or []),
+        "styles":    ", ".join(data.get("styles") or []),
+        "country":   data.get("country") or "",
+        "year":      int(year) if isinstance(year, int) else None,
+        "videos":    videos,
+        "tracklist": tracklist,
     }
 
 
@@ -623,6 +663,91 @@ def get_master_label_rows(
 # ─────────────────────────────────────────────────────────────────────────────
 # LABEL → ARTISTS MAPPING
 # ─────────────────────────────────────────────────────────────────────────────
+
+def get_catalog_videos(
+    entity_type: str,
+    entity_id: str,
+    max_releases: int = 30,
+    min_year: int | None = None,
+    max_year: int | None = None,
+) -> list[dict]:
+    """
+    Fetch all releases for a label or artist and extract YouTube video links.
+
+    Unlike the main crawl (which only captures releases associated with
+    discovered artists), this fetches the full catalog directly from the
+    Discogs label or artist releases endpoint.
+
+    Args:
+        entity_type: "label" or "artist".
+        entity_id:   Discogs label or artist ID.
+        max_releases: Maximum releases to process.
+        min_year:     Skip releases before this year.
+        max_year:     Skip releases after this year.
+
+    Returns:
+        List of dicts with keys:
+            release_id, release_title, artist_name, year,
+            videos (list of {url, title}), label_name
+    """
+    if entity_type == "label":
+        url = f"{API_BASE}/labels/{entity_id}/releases"
+    else:
+        url = f"{API_BASE}/artists/{entity_id}/releases"
+
+    results: list[dict] = []
+
+    for rel in _paged(url, max_items=max_releases):
+        rid = rel.get("id")
+        if not rid:
+            continue
+
+        year_raw = rel.get("year")
+        if min_year and isinstance(year_raw, int) and year_raw < min_year:
+            continue
+        if max_year and isinstance(year_raw, int) and year_raw > max_year:
+            continue
+
+        try:
+            details = get_release_details(str(rid))
+        except Exception:
+            continue
+
+        effective_year = details["year"] or (
+            int(year_raw) if isinstance(year_raw, int) else None
+        )
+
+        # Second year check using the more accurate release-detail year.
+        if min_year and isinstance(effective_year, int) and effective_year < min_year:
+            continue
+        if max_year and isinstance(effective_year, int) and effective_year > max_year:
+            continue
+
+        artist_name = rel.get("artist") or ""
+        title = rel.get("title") or ""
+
+        # For label catalogs, label name comes from the release details.
+        label_name = ""
+        if entity_type == "label":
+            for lab in details["labels"]:
+                if lab["id"] == entity_id:
+                    label_name = lab["name"]
+                    break
+            if not label_name and details["labels"]:
+                label_name = details["labels"][0]["name"]
+
+        results.append({
+            "release_id":    str(rid),
+            "release_title": title,
+            "artist_name":   artist_name,
+            "year":          effective_year,
+            "videos":        details["videos"],
+            "tracklist":     details["tracklist"],
+            "label_name":    label_name,
+        })
+
+    return results
+
 
 def build_label_to_artists(rows: list[dict]) -> dict[str, set[str]]:
     """

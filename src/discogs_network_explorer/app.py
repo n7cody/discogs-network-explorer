@@ -47,6 +47,7 @@ from discogs_network_explorer.backend import (
     clear_http_cache,
     enable_http_cache,
     get_artist_name,
+    get_catalog_videos,
     get_label_earliest_year,
     get_label_latest_year,
     get_label_name,
@@ -78,6 +79,16 @@ from discogs_network_explorer.report import (
     generate_report_html,
     generate_report_zip,
 )
+from discogs_network_explorer.youtube import (
+    add_video_to_playlist,
+    authenticate,
+    clear_credentials,
+    create_playlist,
+    get_stored_token_path,
+    get_youtube_service,
+    load_credentials,
+    search_video,
+)
 
 # Current calendar year used as the upper bound for year-range sliders.
 CURRENT_YEAR: int = datetime.date.today().year
@@ -87,8 +98,8 @@ CURRENT_YEAR: int = datetime.date.today().year
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.set_page_config(page_title="Discogs Network Explorer", layout="wide")
-st.title("Discogs Network Explorer")
+st.set_page_config(page_title="dne — Discogs Network Explorer", layout="wide")
+st.title("dne — Discogs Network Explorer")
 
 # Load .env from the project root or home directory (dev convenience only).
 for _env_path in [".", os.path.expanduser("~")]:
@@ -423,6 +434,23 @@ if run_btn:
         + [c for c in df_raw.columns if c not in _COL_ORDER]
     )
 
+    # Collect earliest/latest release year for every label in df_raw.
+    # Done here (Phase 1) so the data is fetched once and cached in
+    # session state — Phase 2 filter reruns never make year API calls.
+    all_label_ids = list(df_raw["label_id"].astype(str).unique())
+    label_years_map: dict[str, dict[str, int | None]] = {}
+    progress = st.progress(0, text="Collecting label year data…")
+    for idx, lid in enumerate(all_label_ids):
+        label_years_map[lid] = {
+            "earliest": get_label_earliest_year(lid),
+            "latest":   get_label_latest_year(lid),
+        }
+        progress.progress(
+            (idx + 1) / len(all_label_ids),
+            text=f"Collecting label year data… {idx + 1}/{len(all_label_ids)}",
+        )
+    progress.empty()
+
     # Persist the raw dataset and crawl parameters so filter controls can
     # operate on it without triggering another API crawl.
     st.session_state["df_raw"]              = df_raw
@@ -430,6 +458,7 @@ if run_btn:
     st.session_state["seed_label_ids_used"] = seed_label_ids
     st.session_state["seed_artist_ids_used"]= seed_artist_ids
     st.session_state["seed_mode_used"]      = seed_mode
+    st.session_state["label_years"]         = label_years_map
 
     st.success(
         f"Crawl complete: {len(artists)} artists, "
@@ -454,6 +483,9 @@ _artists: set[str]       = st.session_state["artists"]
 _seed_labels_used: list[str]  = st.session_state["seed_label_ids_used"]
 _seed_artists_used: list[str] = st.session_state["seed_artist_ids_used"]
 _seed_mode_used: str          = st.session_state["seed_mode_used"]
+_all_label_years: dict[str, dict[str, int | None]] = st.session_state.get(
+    "label_years", {}
+)
 
 
 # ── Post-fetch filter sidebar ────────────────────────────────────────────────
@@ -598,9 +630,8 @@ elif _seed_mode_used == "Artists Only":
     )
 
 # Release Activity Window — applied after the overlap filter.
-# For labels that passed overlap, check their most recent release via
-# the API (one cached call per label) rather than relying only on the
-# crawled rows, which may not represent the label's full catalog.
+# Uses year data collected during Phase 1 (stored in session state) so
+# no API calls are made here.
 if activity_window_on and not df.empty:
     seed_ids_set = {str(s) for s in (_seed_labels_used or [])}
     surviving_labels = set(df["label_id"].astype(str).unique())
@@ -608,7 +639,7 @@ if activity_window_on and not df.empty:
     for lid in surviving_labels:
         if lid in seed_ids_set:
             continue  # seed labels always kept
-        latest = get_label_latest_year(lid)
+        latest = _all_label_years.get(lid, {}).get("latest")
         if latest is not None and latest < activity_window_start:
             inactive_labels.add(lid)
     if inactive_labels:
@@ -623,14 +654,11 @@ if activity_window_on and not df.empty:
             min_releases_in_window=activity_min_releases,
         )
 
-# Collect earliest and latest release years for all surviving labels.
-# One cached API call each — used for graph coloring and Excel output.
-_label_years: dict[str, dict[str, int | None]] = {}
-for _lid in df["label_id"].astype(str).unique():
-    _label_years[_lid] = {
-        "earliest": get_label_earliest_year(_lid),
-        "latest":   get_label_latest_year(_lid),
-    }
+# Look up year data from Phase 1 cache for labels surviving filters.
+_label_years: dict[str, dict[str, int | None]] = {
+    _lid: _all_label_years.get(_lid, {"earliest": None, "latest": None})
+    for _lid in df["label_id"].astype(str).unique()
+}
 
 if df.empty:
     st.warning(
@@ -1059,3 +1087,350 @@ with tab_report:
             file_name="discogs_report.zip",
             mime="application/zip",
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DNX — DISCOGS NETWORK XTRACTOR (YouTube playlist builder)
+# ─────────────────────────────────────────────────────────────────────────────
+
+st.markdown("---")
+st.header("dnx — Discogs Network Xtractor")
+st.caption(
+    "Build a YouTube playlist from Discogs labels or artists discovered above. "
+    "Uses community-curated YouTube links from Discogs release pages when "
+    "available, falling back to YouTube search for releases without links."
+)
+
+# ── YouTube authentication ──────────────────────────────────────────────────
+
+_yt_creds = load_credentials()
+_yt_connected = _yt_creds is not None
+
+col_yt_status, col_yt_action = st.columns([3, 1])
+with col_yt_status:
+    if _yt_connected:
+        st.success("YouTube connected.")
+    else:
+        st.info("YouTube not connected. Provide your OAuth client secret JSON to connect.")
+
+with col_yt_action:
+    if _yt_connected:
+        if st.button("Disconnect YouTube"):
+            clear_credentials()
+            st.rerun()
+
+if not _yt_connected:
+    _client_secret_path = st.text_input(
+        "Path to Google OAuth client_secret JSON",
+        value=os.path.expanduser("~/client_secret.json"),
+        help="Download this from Google Cloud Console → APIs & Services → Credentials.",
+    )
+    if st.button("Connect YouTube"):
+        if not os.path.isfile(_client_secret_path):
+            st.error(f"File not found: {_client_secret_path}")
+        else:
+            try:
+                with st.spinner("Opening browser for Google authorization…"):
+                    _yt_creds = authenticate(_client_secret_path)
+                _yt_connected = True
+                st.success("YouTube connected! Token saved to " + str(get_stored_token_path()))
+                st.rerun()
+            except Exception as exc:
+                st.error(f"YouTube authorization failed: {exc}")
+
+if not _yt_connected:
+    st.stop()
+
+# ── dnx input ───────────────────────────────────────────────────────────────
+
+# Build a lookup from label names → label IDs using the current dataset.
+_name_to_lid: dict[str, str] = {}
+for _lid_key, _lname in _label_names.items():
+    _name_to_lid[_lname.lower()] = _lid_key
+
+dnx_input_type = st.radio(
+    "Input type",
+    ["Label names", "Label IDs", "Artist IDs"],
+    horizontal=True,
+)
+
+if dnx_input_type == "Label names":
+    dnx_raw = st.text_input(
+        "Label names (comma separated)",
+        placeholder="e.g. Livity Sound, NAFF",
+        help="Names are matched against labels in the current dataset (case-insensitive).",
+    )
+elif dnx_input_type == "Label IDs":
+    dnx_raw = st.text_input(
+        "Label IDs (comma separated)",
+        placeholder="e.g. 251117, 1390196",
+    )
+else:
+    dnx_raw = st.text_input(
+        "Artist IDs (comma separated)",
+        placeholder="e.g. 1606986, 2742670",
+    )
+
+dnx_max_releases = st.slider(
+    "Max releases per label/artist",
+    min_value=1,
+    max_value=200,
+    value=30,
+    help=(
+        "Limits how many releases to fetch per input from the full Discogs catalog. "
+        "Each release may contribute multiple videos (one per track)."
+    ),
+)
+
+dnx_col1, dnx_col2 = st.columns(2)
+with dnx_col1:
+    dnx_min_year = st.number_input(
+        "dnx min year",
+        min_value=1900,
+        max_value=CURRENT_YEAR,
+        value=1900,
+        help="Only include releases from this year onward.",
+    )
+with dnx_col2:
+    dnx_max_year = st.number_input(
+        "dnx max year",
+        min_value=1900,
+        max_value=CURRENT_YEAR,
+        value=CURRENT_YEAR,
+        help="Only include releases up to this year.",
+    )
+
+dnx_search_fallback = st.checkbox(
+    "YouTube search fallback for releases without Discogs video links",
+    value=False,
+    help=(
+        "When enabled, releases without embedded YouTube links on their "
+        "Discogs page will be searched on YouTube by artist + title. "
+        "Costs 100 YouTube API quota units per search (daily limit: 10,000)."
+    ),
+)
+
+dnx_playlist_name = st.text_input(
+    "Playlist name",
+    value=f"dnx — {datetime.date.today().isoformat()}",
+)
+
+# ── Resolve inputs and fetch full catalogs ─────────────────────────────────
+
+
+def _extract_yt_video_id(url: str) -> str | None:
+    """Extract YouTube video ID from a watch or youtu.be URL."""
+    import re
+    m = re.search(r"(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})", url)
+    return m.group(1) if m else None
+
+
+if st.button("Build YouTube Playlist", type="primary"):
+    entries = [e.strip() for e in dnx_raw.split(",") if e.strip()]
+    if not entries:
+        st.error("Enter at least one label or artist.")
+        st.stop()
+
+    # Resolve label names to IDs if needed.
+    if dnx_input_type == "Label names":
+        resolved_lids: list[str] = []
+        unresolved: list[str] = []
+        for name in entries:
+            lid = _name_to_lid.get(name.lower())
+            if lid:
+                resolved_lids.append(lid)
+            else:
+                unresolved.append(name)
+        if unresolved:
+            st.warning(f"Could not match label names: {', '.join(unresolved)}")
+        if not resolved_lids:
+            st.error("No labels matched. Check spelling or use label IDs instead.")
+            st.stop()
+        entity_type = "label"
+        entity_ids = resolved_lids
+    elif dnx_input_type == "Label IDs":
+        entity_type = "label"
+        entity_ids = entries
+    else:
+        entity_type = "artist"
+        entity_ids = entries
+
+    # Year filter — use None when set to boundary values (no filtering).
+    eff_min_year = dnx_min_year if dnx_min_year > 1900 else None
+    eff_max_year = dnx_max_year if dnx_max_year < CURRENT_YEAR else None
+
+    # ── Fetch full catalogs via Discogs API ────────────────────────────────
+
+    all_releases: list[dict] = []
+    progress = st.progress(0, text="Fetching catalogs from Discogs…")
+    for eidx, eid in enumerate(entity_ids):
+        try:
+            catalog = get_catalog_videos(
+                entity_type=entity_type,
+                entity_id=eid,
+                max_releases=dnx_max_releases,
+                min_year=eff_min_year,
+                max_year=eff_max_year,
+            )
+            all_releases.extend(catalog)
+        except Exception as exc:
+            st.warning(f"Failed to fetch catalog for {entity_type} {eid}: {exc}")
+        progress.progress(
+            (eidx + 1) / len(entity_ids),
+            text=f"Fetching catalogs… {eidx + 1}/{len(entity_ids)}",
+        )
+    progress.empty()
+
+    if not all_releases:
+        st.warning("No releases found. Check the IDs and year range.")
+        st.stop()
+
+    # ── Collect videos from fetched releases ───────────────────────────────
+
+    video_queue: list[dict] = []
+    search_queue: list[dict] = []
+    no_embed_count = 0
+
+    for rel in all_releases:
+        vids = rel.get("videos") or []
+        if vids:
+            for v in vids:
+                vid_id = _extract_yt_video_id(v["url"])
+                if vid_id:
+                    video_queue.append({
+                        "video_id": vid_id,
+                        "title":    v["title"],
+                        "artist":   rel["artist_name"],
+                        "release":  rel["release_title"],
+                        "label":    rel.get("label_name", ""),
+                        "source":   "discogs",
+                    })
+        else:
+            # No embedded videos — queue individual tracks for search.
+            tracklist = rel.get("tracklist") or []
+            if tracklist:
+                for track in tracklist:
+                    if track["artist"] and track["title"]:
+                        search_queue.append({
+                            "artist":  track["artist"],
+                            "title":   track["title"],
+                            "release": rel["release_title"],
+                            "label":   rel.get("label_name", ""),
+                            "rid":     rel["release_id"],
+                        })
+            no_embed_count += 1
+
+    releases_with_vids = len(all_releases) - no_embed_count
+    st.info(
+        f"Fetched **{len(all_releases)}** releases. "
+        f"Found **{len(video_queue)}** embedded videos across "
+        f"**{releases_with_vids}** releases. "
+        f"**{no_embed_count}** releases have no Discogs video links"
+        + (f" ({len(search_queue)} tracks queued for search)." if search_queue else ".")
+    )
+
+    # ── YouTube search fallback (per-track) ────────────────────────────────
+
+    if dnx_search_fallback and search_queue:
+        yt_service = get_youtube_service(_yt_creds)
+        search_errors: list[str] = []
+        progress = st.progress(0, text="Searching YouTube for individual tracks…")
+        for idx, item in enumerate(search_queue):
+            query = f"{item['artist']} - {item['title']}"
+            try:
+                result = search_video(yt_service, query)
+            except Exception as exc:
+                search_errors.append(f"{query}: {exc}")
+                result = None
+            if result:
+                video_queue.append({
+                    "video_id": result["video_id"],
+                    "title":    result["title"],
+                    "artist":   item["artist"],
+                    "release":  item["release"],
+                    "label":    item["label"],
+                    "source":   "yt_search",
+                })
+            progress.progress(
+                (idx + 1) / len(search_queue),
+                text=f"YouTube search… {idx + 1}/{len(search_queue)} tracks",
+            )
+        progress.empty()
+        if search_errors:
+            with st.expander(f"YouTube search errors ({len(search_errors)})"):
+                for err in search_errors:
+                    st.text(err)
+
+    if not video_queue:
+        if not dnx_search_fallback and search_queue:
+            st.warning(
+                f"No embedded Discogs video links found. "
+                f"Enable **YouTube search fallback** above to search YouTube "
+                f"for the {len(search_queue)} track(s) by artist + title."
+            )
+        else:
+            st.warning("No videos found to add.")
+        st.stop()
+
+    # ── Deduplicate by video_id ─────────────────────────────────────────────
+
+    seen_vids: set[str] = set()
+    unique_queue: list[dict] = []
+    for v in video_queue:
+        if v["video_id"] not in seen_vids:
+            seen_vids.add(v["video_id"])
+            unique_queue.append(v)
+    video_queue = unique_queue
+
+    # ── Build playlist ──────────────────────────────────────────────────────
+
+    yt_service = get_youtube_service(_yt_creds)
+
+    playlist_id = create_playlist(
+        yt_service,
+        title=dnx_playlist_name,
+        description=(
+            f"Auto-generated by dnx (Discogs Network Xtractor) on "
+            f"{datetime.date.today().isoformat()}. "
+            f"{len(video_queue)} videos from {len(all_releases)} releases."
+        ),
+    )
+    playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
+    st.info(f"Created playlist: [{dnx_playlist_name}]({playlist_url})")
+
+    added = 0
+    failed = 0
+    progress = st.progress(0, text="Adding videos to playlist…")
+    results_log: list[dict] = []
+
+    for idx, v in enumerate(video_queue):
+        try:
+            add_video_to_playlist(yt_service, playlist_id, v["video_id"])
+            added += 1
+            v["status"] = "added"
+        except Exception:
+            failed += 1
+            v["status"] = "failed"
+        results_log.append(v)
+
+        progress.progress(
+            (idx + 1) / len(video_queue),
+            text=f"Adding to playlist… {idx + 1}/{len(video_queue)} ({added} added)",
+        )
+
+    progress.empty()
+
+    discogs_count = sum(1 for r in results_log if r["source"] == "discogs" and r["status"] == "added")
+    search_count = sum(1 for r in results_log if r["source"] == "yt_search" and r["status"] == "added")
+
+    st.success(
+        f"Done — **{added}** videos added "
+        f"({discogs_count} from Discogs, {search_count} from YouTube search), "
+        f"**{failed}** failed. "
+        f"[Open playlist]({playlist_url})"
+    )
+
+    with st.expander("Extraction log"):
+        log_df = pd.DataFrame(results_log)
+        display_cols = [c for c in ["artist", "release", "title", "source", "status", "video_id", "label"] if c in log_df.columns]
+        st.dataframe(log_df[display_cols], use_container_width=True)

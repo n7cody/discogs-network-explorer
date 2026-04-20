@@ -89,6 +89,17 @@ from discogs_network_explorer.youtube import (
     load_credentials,
     search_video,
 )
+from discogs_network_explorer.apple_music import (
+    clear_credentials as am_clear_credentials,
+    create_playlist as am_create_playlist,
+    add_songs_to_playlist as am_add_songs_to_playlist,
+    is_connected as am_is_connected,
+    load_config as am_load_config,
+    load_user_token as am_load_user_token,
+    save_config as am_save_config,
+    save_user_token as am_save_user_token,
+    search_song as am_search_song,
+)
 
 # Current calendar year used as the upper bound for year-range sliders.
 CURRENT_YEAR: int = datetime.date.today().year
@@ -1091,56 +1102,140 @@ with tab_report:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DNX — DISCOGS NETWORK XTRACTOR (YouTube playlist builder)
+# DNX — DISCOGS NETWORK XTRACTOR (playlist builder)
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.markdown("---")
 st.header("dnx — Discogs Network Xtractor")
 st.caption(
-    "Build a YouTube playlist from Discogs labels or artists discovered above. "
+    "Build a playlist from Discogs labels or artists discovered above. "
     "Uses community-curated YouTube links from Discogs release pages when "
-    "available, falling back to YouTube search for releases without links."
+    "available, falling back to search for releases without links."
+)
+
+# ── Platform selector ───────────────────────────────────────────────────────
+
+dnx_platform = st.radio(
+    "Platform",
+    ["YouTube", "Apple Music"],
+    horizontal=True,
+    key="dnx_platform",
 )
 
 # ── YouTube authentication ──────────────────────────────────────────────────
 
-_yt_creds = load_credentials()
-_yt_connected = _yt_creds is not None
+if dnx_platform == "YouTube":
+    _yt_creds = load_credentials()
+    _yt_connected = _yt_creds is not None
 
-col_yt_status, col_yt_action = st.columns([3, 1])
-with col_yt_status:
-    if _yt_connected:
-        st.success("YouTube connected.")
-    else:
-        st.info("YouTube not connected. Provide your OAuth client secret JSON to connect.")
-
-with col_yt_action:
-    if _yt_connected:
-        if st.button("Disconnect YouTube"):
-            clear_credentials()
-            st.rerun()
-
-if not _yt_connected:
-    _client_secret_path = st.text_input(
-        "Path to Google OAuth client_secret JSON",
-        value=os.path.expanduser("~/client_secret.json"),
-        help="Download this from Google Cloud Console → APIs & Services → Credentials.",
-    )
-    if st.button("Connect YouTube"):
-        if not os.path.isfile(_client_secret_path):
-            st.error(f"File not found: {_client_secret_path}")
+    col_yt_status, col_yt_action = st.columns([3, 1])
+    with col_yt_status:
+        if _yt_connected:
+            st.success("YouTube connected.")
         else:
-            try:
-                with st.spinner("Opening browser for Google authorization…"):
-                    _yt_creds = authenticate(_client_secret_path)
-                _yt_connected = True
-                st.success("YouTube connected! Token saved to " + str(get_stored_token_path()))
-                st.rerun()
-            except Exception as exc:
-                st.error(f"YouTube authorization failed: {exc}")
+            st.info("YouTube not connected. Provide your OAuth client secret JSON to connect.")
 
-if not _yt_connected:
-    st.stop()
+    with col_yt_action:
+        if _yt_connected:
+            if st.button("Disconnect YouTube"):
+                clear_credentials()
+                st.rerun()
+
+    if not _yt_connected:
+        _client_secret_path = st.text_input(
+            "Path to Google OAuth client_secret JSON",
+            value=os.path.expanduser("~/client_secret.json"),
+            help="Download this from Google Cloud Console → APIs & Services → Credentials.",
+        )
+        if st.button("Connect YouTube"):
+            if not os.path.isfile(_client_secret_path):
+                st.error(f"File not found: {_client_secret_path}")
+            else:
+                try:
+                    with st.spinner("Opening browser for Google authorization…"):
+                        _yt_creds = authenticate(_client_secret_path)
+                    _yt_connected = True
+                    st.success("YouTube connected! Token saved to " + str(get_stored_token_path()))
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"YouTube authorization failed: {exc}")
+
+    if not _yt_connected:
+        st.stop()
+
+# ── Apple Music authentication ──────────────────────────────────────────────
+
+if dnx_platform == "Apple Music":
+    _am_config = am_load_config()
+    _am_user_token = am_load_user_token()
+    _am_connected = _am_config is not None and _am_user_token is not None
+
+    col_am_status, col_am_action = st.columns([3, 1])
+    with col_am_status:
+        if _am_connected:
+            st.success("Apple Music connected.")
+        else:
+            st.info(
+                "Apple Music not connected. Provide your MusicKit credentials below. "
+                "See apple_music_setup.txt for setup instructions."
+            )
+
+    with col_am_action:
+        if _am_connected:
+            if st.button("Disconnect Apple Music"):
+                am_clear_credentials()
+                st.rerun()
+
+    if not _am_connected:
+        with st.expander("Apple Music developer credentials", expanded=True):
+            am_team_id = st.text_input(
+                "Team ID",
+                help="10-character alphanumeric ID from Apple Developer account.",
+            )
+            am_key_id = st.text_input(
+                "Key ID",
+                help="10-character alphanumeric MusicKit key ID.",
+            )
+            am_p8_path = st.text_input(
+                "Path to .p8 private key file",
+                value=os.path.expanduser("~/AuthKey.p8"),
+                help="Downloaded from Apple Developer portal → Certificates, Identifiers & Profiles → Keys.",
+            )
+            am_user_token_input = st.text_input(
+                "Music User Token",
+                type="password",
+                help=(
+                    "Obtained via MusicKit JS authorization in a browser. "
+                    "See apple_music_setup.txt for how to get this token."
+                ),
+            )
+            if st.button("Connect Apple Music"):
+                if not am_team_id or not am_key_id:
+                    st.error("Team ID and Key ID are required.")
+                elif not os.path.isfile(am_p8_path):
+                    st.error(f"Private key file not found: {am_p8_path}")
+                elif not am_user_token_input.strip():
+                    st.error("Music User Token is required.")
+                else:
+                    try:
+                        dev_token = am_save_config(am_team_id, am_key_id, am_p8_path)
+                        am_save_user_token(am_user_token_input)
+                        _am_connected = True
+                        _am_config = am_load_config()
+                        _am_user_token = am_user_token_input.strip()
+                        st.success("Apple Music connected! Credentials saved to ~/.dne/")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Apple Music setup failed: {exc}")
+
+    if not _am_connected:
+        st.stop()
+
+    am_storefront = st.text_input(
+        "Apple Music storefront",
+        value="us",
+        help="ISO 3166-1 alpha-2 country code for your Apple Music subscription (e.g. us, gb, de).",
+    )
 
 # ── dnx input ───────────────────────────────────────────────────────────────
 
@@ -1202,12 +1297,14 @@ with dnx_col2:
     )
 
 dnx_search_fallback = st.checkbox(
-    "YouTube search fallback for releases without Discogs video links",
-    value=False,
+    f"{'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'} search fallback for releases without Discogs video links",
+    value=False if dnx_platform == "YouTube" else True,
     help=(
         "When enabled, releases without embedded YouTube links on their "
-        "Discogs page will be searched on YouTube by artist + title. "
-        "Costs 100 YouTube API quota units per search (daily limit: 10,000)."
+        "Discogs page will be searched by artist + title. "
+        + ("Costs 100 YouTube API quota units per search (daily limit: 10,000)."
+           if dnx_platform == "YouTube"
+           else "Apple Music catalog search has no quota limit.")
     ),
 )
 
@@ -1226,7 +1323,7 @@ def _extract_yt_video_id(url: str) -> str | None:
     return m.group(1) if m else None
 
 
-if st.button("Build YouTube Playlist", type="primary"):
+if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'} Playlist", type="primary"):
     entries = [e.strip() for e in dnx_raw.split(",") if e.strip()]
     if not entries:
         st.error("Enter at least one label or artist.")
@@ -1286,28 +1383,54 @@ if st.button("Build YouTube Playlist", type="primary"):
         st.warning("No releases found. Check the IDs and year range.")
         st.stop()
 
-    # ── Collect videos from fetched releases ───────────────────────────────
+    # ── Collect videos/tracks from fetched releases ─────────────────────────
 
     video_queue: list[dict] = []
     search_queue: list[dict] = []
     no_embed_count = 0
 
-    for rel in all_releases:
-        vids = rel.get("videos") or []
-        if vids:
-            for v in vids:
-                vid_id = _extract_yt_video_id(v["url"])
-                if vid_id:
-                    video_queue.append({
-                        "video_id": vid_id,
-                        "title":    v["title"],
-                        "artist":   rel["artist_name"],
-                        "release":  rel["release_title"],
-                        "label":    rel.get("label_name", ""),
-                        "source":   "discogs",
-                    })
-        else:
-            # No embedded videos — queue individual tracks for search.
+    if dnx_platform == "YouTube":
+        # YouTube path — prefer embedded Discogs video links.
+        for rel in all_releases:
+            vids = rel.get("videos") or []
+            if vids:
+                for v in vids:
+                    vid_id = _extract_yt_video_id(v["url"])
+                    if vid_id:
+                        video_queue.append({
+                            "video_id": vid_id,
+                            "title":    v["title"],
+                            "artist":   rel["artist_name"],
+                            "release":  rel["release_title"],
+                            "label":    rel.get("label_name", ""),
+                            "source":   "discogs",
+                        })
+            else:
+                tracklist = rel.get("tracklist") or []
+                if tracklist:
+                    for track in tracklist:
+                        if track["artist"] and track["title"]:
+                            search_queue.append({
+                                "artist":  track["artist"],
+                                "title":   track["title"],
+                                "release": rel["release_title"],
+                                "label":   rel.get("label_name", ""),
+                                "rid":     rel["release_id"],
+                            })
+                no_embed_count += 1
+
+        releases_with_vids = len(all_releases) - no_embed_count
+        st.info(
+            f"Fetched **{len(all_releases)}** releases. "
+            f"Found **{len(video_queue)}** embedded videos across "
+            f"**{releases_with_vids}** releases. "
+            f"**{no_embed_count}** releases have no Discogs video links"
+            + (f" ({len(search_queue)} tracks queued for search)." if search_queue else ".")
+        )
+
+    else:
+        # Apple Music path — all tracks go to search (no embeds on Discogs).
+        for rel in all_releases:
             tracklist = rel.get("tracklist") or []
             if tracklist:
                 for track in tracklist:
@@ -1319,117 +1442,205 @@ if st.button("Build YouTube Playlist", type="primary"):
                             "label":   rel.get("label_name", ""),
                             "rid":     rel["release_id"],
                         })
-            no_embed_count += 1
+            else:
+                # No tracklist — use release-level info.
+                if rel["artist_name"] and rel["release_title"]:
+                    search_queue.append({
+                        "artist":  rel["artist_name"],
+                        "title":   rel["release_title"],
+                        "release": rel["release_title"],
+                        "label":   rel.get("label_name", ""),
+                        "rid":     rel["release_id"],
+                    })
 
-    releases_with_vids = len(all_releases) - no_embed_count
-    st.info(
-        f"Fetched **{len(all_releases)}** releases. "
-        f"Found **{len(video_queue)}** embedded videos across "
-        f"**{releases_with_vids}** releases. "
-        f"**{no_embed_count}** releases have no Discogs video links"
-        + (f" ({len(search_queue)} tracks queued for search)." if search_queue else ".")
-    )
+        st.info(
+            f"Fetched **{len(all_releases)}** releases. "
+            f"**{len(search_queue)}** tracks queued for Apple Music search."
+        )
 
-    # ── YouTube search fallback (per-track) ────────────────────────────────
+    # ── Search fallback (per-track) ───────────────────────────────────────
+
+    search_errors: list[str] = []
 
     if dnx_search_fallback and search_queue:
-        yt_service = get_youtube_service(_yt_creds)
-        search_errors: list[str] = []
-        progress = st.progress(0, text="Searching YouTube for individual tracks…")
-        for idx, item in enumerate(search_queue):
-            query = f"{item['artist']} - {item['title']}"
-            try:
-                result = search_video(yt_service, query)
-            except Exception as exc:
-                search_errors.append(f"{query}: {exc}")
-                result = None
-            if result:
-                video_queue.append({
-                    "video_id": result["video_id"],
-                    "title":    result["title"],
-                    "artist":   item["artist"],
-                    "release":  item["release"],
-                    "label":    item["label"],
-                    "source":   "yt_search",
-                })
-            progress.progress(
-                (idx + 1) / len(search_queue),
-                text=f"YouTube search… {idx + 1}/{len(search_queue)} tracks",
-            )
-        progress.empty()
+        if dnx_platform == "YouTube":
+            yt_service = get_youtube_service(_yt_creds)
+            progress = st.progress(0, text="Searching YouTube for individual tracks…")
+            for idx, item in enumerate(search_queue):
+                query = f"{item['artist']} - {item['title']}"
+                try:
+                    result = search_video(yt_service, query)
+                except Exception as exc:
+                    search_errors.append(f"{query}: {exc}")
+                    result = None
+                if result:
+                    video_queue.append({
+                        "video_id": result["video_id"],
+                        "title":    result["title"],
+                        "artist":   item["artist"],
+                        "release":  item["release"],
+                        "label":    item["label"],
+                        "source":   "yt_search",
+                    })
+                progress.progress(
+                    (idx + 1) / len(search_queue),
+                    text=f"YouTube search… {idx + 1}/{len(search_queue)} tracks",
+                )
+            progress.empty()
+
+        else:
+            # Apple Music search.
+            _am_dev_token = _am_config["developer_token"]
+            progress = st.progress(0, text="Searching Apple Music for tracks…")
+            for idx, item in enumerate(search_queue):
+                query = f"{item['artist']} - {item['title']}"
+                try:
+                    result = am_search_song(_am_dev_token, query, storefront=am_storefront)
+                except Exception as exc:
+                    search_errors.append(f"{query}: {exc}")
+                    result = None
+                if result:
+                    video_queue.append({
+                        "video_id": result["song_id"],
+                        "title":    result["title"],
+                        "artist":   result["artist"],
+                        "release":  item["release"],
+                        "label":    item["label"],
+                        "source":   "am_search",
+                    })
+                progress.progress(
+                    (idx + 1) / len(search_queue),
+                    text=f"Apple Music search… {idx + 1}/{len(search_queue)} tracks",
+                )
+            progress.empty()
+
         if search_errors:
-            with st.expander(f"YouTube search errors ({len(search_errors)})"):
+            with st.expander(f"Search errors ({len(search_errors)})"):
                 for err in search_errors:
                     st.text(err)
 
     if not video_queue:
         if not dnx_search_fallback and search_queue:
+            _platform_label = "YouTube" if dnx_platform == "YouTube" else "Apple Music"
             st.warning(
-                f"No embedded Discogs video links found. "
-                f"Enable **YouTube search fallback** above to search YouTube "
+                f"No tracks found. "
+                f"Enable **search fallback** above to search {_platform_label} "
                 f"for the {len(search_queue)} track(s) by artist + title."
             )
         else:
-            st.warning("No videos found to add.")
+            st.warning("No tracks found to add.")
         st.stop()
 
-    # ── Deduplicate by video_id ─────────────────────────────────────────────
+    # ── Deduplicate by video_id / song_id ─────────────────────────────────
 
-    seen_vids: set[str] = set()
+    seen_ids: set[str] = set()
     unique_queue: list[dict] = []
     for v in video_queue:
-        if v["video_id"] not in seen_vids:
-            seen_vids.add(v["video_id"])
+        if v["video_id"] not in seen_ids:
+            seen_ids.add(v["video_id"])
             unique_queue.append(v)
     video_queue = unique_queue
 
     # ── Build playlist ──────────────────────────────────────────────────────
 
-    yt_service = get_youtube_service(_yt_creds)
-
-    playlist_id = create_playlist(
-        yt_service,
-        title=dnx_playlist_name,
-        description=(
-            f"Auto-generated by dnx (Discogs Network Xtractor) on "
-            f"{datetime.date.today().isoformat()}. "
-            f"{len(video_queue)} videos from {len(all_releases)} releases."
-        ),
+    _playlist_description = (
+        f"Auto-generated by dnx (Discogs Network Xtractor) on "
+        f"{datetime.date.today().isoformat()}. "
+        f"{len(video_queue)} tracks from {len(all_releases)} releases."
     )
-    playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
-    st.info(f"Created playlist: [{dnx_playlist_name}]({playlist_url})")
 
-    added = 0
-    failed = 0
-    progress = st.progress(0, text="Adding videos to playlist…")
-    results_log: list[dict] = []
+    if dnx_platform == "YouTube":
+        yt_service = get_youtube_service(_yt_creds)
 
-    for idx, v in enumerate(video_queue):
-        try:
-            add_video_to_playlist(yt_service, playlist_id, v["video_id"])
-            added += 1
-            v["status"] = "added"
-        except Exception:
-            failed += 1
-            v["status"] = "failed"
-        results_log.append(v)
+        playlist_id = create_playlist(
+            yt_service,
+            title=dnx_playlist_name,
+            description=_playlist_description,
+        )
+        playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
+        st.info(f"Created playlist: [{dnx_playlist_name}]({playlist_url})")
 
-        progress.progress(
-            (idx + 1) / len(video_queue),
-            text=f"Adding to playlist… {idx + 1}/{len(video_queue)} ({added} added)",
+        added = 0
+        failed = 0
+        progress = st.progress(0, text="Adding videos to playlist…")
+        results_log: list[dict] = []
+
+        for idx, v in enumerate(video_queue):
+            try:
+                add_video_to_playlist(yt_service, playlist_id, v["video_id"])
+                added += 1
+                v["status"] = "added"
+            except Exception:
+                failed += 1
+                v["status"] = "failed"
+            results_log.append(v)
+
+            progress.progress(
+                (idx + 1) / len(video_queue),
+                text=f"Adding to playlist… {idx + 1}/{len(video_queue)} ({added} added)",
+            )
+
+        progress.empty()
+
+        discogs_count = sum(1 for r in results_log if r["source"] == "discogs" and r["status"] == "added")
+        search_count = sum(1 for r in results_log if r.get("source") in ("yt_search",) and r["status"] == "added")
+
+        st.success(
+            f"Done — **{added}** videos added "
+            f"({discogs_count} from Discogs, {search_count} from YouTube search), "
+            f"**{failed}** failed. "
+            f"[Open playlist]({playlist_url})"
         )
 
-    progress.empty()
+    else:
+        # Apple Music — batch add songs to playlist.
+        _am_dev_token = _am_config["developer_token"]
 
-    discogs_count = sum(1 for r in results_log if r["source"] == "discogs" and r["status"] == "added")
-    search_count = sum(1 for r in results_log if r["source"] == "yt_search" and r["status"] == "added")
+        playlist_id = am_create_playlist(
+            _am_dev_token,
+            _am_user_token,
+            title=dnx_playlist_name,
+            description=_playlist_description,
+        )
+        st.info(f"Created Apple Music playlist: **{dnx_playlist_name}**")
 
-    st.success(
-        f"Done — **{added}** videos added "
-        f"({discogs_count} from Discogs, {search_count} from YouTube search), "
-        f"**{failed}** failed. "
-        f"[Open playlist]({playlist_url})"
-    )
+        # Apple Music supports batch adding — send in chunks of 25.
+        added = 0
+        failed = 0
+        results_log = []
+        chunk_size = 25
+        progress = st.progress(0, text="Adding songs to playlist…")
+
+        for chunk_start in range(0, len(video_queue), chunk_size):
+            chunk = video_queue[chunk_start:chunk_start + chunk_size]
+            song_ids = [v["video_id"] for v in chunk]
+            try:
+                am_add_songs_to_playlist(
+                    _am_dev_token, _am_user_token, playlist_id, song_ids,
+                )
+                for v in chunk:
+                    v["status"] = "added"
+                    added += 1
+            except Exception:
+                for v in chunk:
+                    v["status"] = "failed"
+                    failed += 1
+            results_log.extend(chunk)
+
+            progress.progress(
+                min((chunk_start + chunk_size), len(video_queue)) / len(video_queue),
+                text=f"Adding to playlist… {min(chunk_start + chunk_size, len(video_queue))}/{len(video_queue)} ({added} added)",
+            )
+
+        progress.empty()
+
+        search_count = sum(1 for r in results_log if r.get("source") == "am_search" and r["status"] == "added")
+
+        st.success(
+            f"Done — **{added}** songs added "
+            f"({search_count} from Apple Music search), "
+            f"**{failed}** failed."
+        )
 
     with st.expander("Extraction log"):
         log_df = pd.DataFrame(results_log)

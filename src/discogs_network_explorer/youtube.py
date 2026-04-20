@@ -74,7 +74,11 @@ def load_credentials() -> Credentials | None:
 
     if creds.expired and creds.refresh_token:
         from google.auth.transport.requests import Request
-        creds.refresh(Request())
+        try:
+            creds.refresh(Request())
+        except Exception:
+            _TOKEN_PATH.unlink(missing_ok=True)
+            return None
         _save_token(creds)
 
     if not creds.valid:

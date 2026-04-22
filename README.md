@@ -64,13 +64,28 @@ The **Results** tab produces a `.xlsx` file with three sheets:
 
 1. **Run Info** — seed configuration, search parameters, and the discovered/input artist list
 2. **All Releases** — every release row pulled during the crawl
-3. **Discovered Labels** — one row per label with artist names, overlap percentage, and label ID
+3. **Discovered Labels** — one row per label with artist names, total Discogs release count, overlap percentage, earliest/latest year, and label ID
 
 ## dnx — Discogs Network Xtractor
 
-**dnx** builds YouTube playlists from labels or artists discovered during an analysis. It extracts community-curated YouTube links embedded on Discogs release pages — no YouTube search required for most tracks.
+**dnx** builds playlists on **YouTube** or **Apple Music** from labels or artists discovered during an analysis. A platform selector at the top of the dnx section lets you choose your target.
+
+- **YouTube** — extracts community-curated YouTube links embedded on Discogs release pages. No YouTube API cost to discover most tracks. Search fallback (off by default) finds tracks for releases without embedded links.
+- **Apple Music** — all tracks go through Apple Music catalog search (Discogs has no Apple Music embeds). Search fallback defaults to ON.
 
 dnx appears at the bottom of the app after running an analysis.
+
+### Match quality scoring
+
+When dnx searches YouTube or Apple Music for tracks, each result is scored by comparing the Discogs artist name and track title against the platform's returned match:
+
+| Verdict | Criteria | Action |
+|---------|----------|--------|
+| **Accept** | Artist similarity >= 0.7 and track similarity >= 0.5 | Added to playlist automatically |
+| **Borderline** | Artist similarity >= 0.5 but below accept threshold | Shown in a review table with checkboxes |
+| **Reject** | Artist similarity < 0.5 | Discarded (shown in collapsed expander) |
+
+Borderline tracks default to unchecked — you opt in. Accepted borderline tracks are re-inserted at their original position so the playlist stays in release order.
 
 ### YouTube API setup (one-time)
 
@@ -117,6 +132,44 @@ The free daily quota is 10,000 units. dnx primarily uses Discogs-embedded video 
 | YouTube search (fallback, off by default) | 100 units per search |
 
 A typical run adding 100 videos costs ~5,050 units — well within the daily limit.
+
+### Apple Music setup (one-time)
+
+dnx uses Apple's MusicKit API. You need a paid [Apple Developer Program](https://developer.apple.com/programs/) membership ($99/year).
+
+1. **Register a Media ID**
+   - Sign in to [Apple Developer](https://developer.apple.com/account) → Certificates, Identifiers & Profiles → **Identifiers**
+   - Click **"+"** → select **Media IDs** → Continue
+   - Enter a description (e.g. "dnx") and identifier (e.g. `com.yourname.dnx`)
+   - Check **MusicKit** → Continue → Register
+
+2. **Create a MusicKit key**
+   - Go to **Keys** → click **"+"**
+   - Check **MusicKit**, associate it with the Media ID you just created, give it a name (e.g. "dnx")
+   - Download the `.p8` private key file (you can only download it once)
+   - Note your **Team ID** (top-right of the portal, 10 characters) and **Key ID** (shown on the key details page, 10 characters)
+
+3. **Get a Music User Token**
+   - Generate a developer token (JWT) in Python:
+     ```python
+     from discogs_network_explorer.apple_music import generate_developer_token
+     print(generate_developer_token("YOUR_TEAM_ID", "YOUR_KEY_ID", "~/AuthKey_XXXXXX.p8"))
+     ```
+   - Save the HTML page from `apple_music_setup.txt`, paste your developer token into the `DEVELOPER_TOKEN` line
+   - Serve the file over localhost (`python3 -m http.server 8080`) and open it in **Safari**
+   - Click Authorize, sign in with your Apple ID, and copy the Music User Token
+
+4. **Connect in the app**
+   - In the dnx section, select **Apple Music**
+   - Enter your Team ID, Key ID, path to `.p8` file, and Music User Token
+   - Click **Connect Apple Music** — credentials are saved to `~/.dne/` for future sessions
+
+### Apple Music notes
+
+- The developer token auto-regenerates from your `.p8` key when it expires (~6 months)
+- The Music User Token may expire — re-authorize via the HTML page if playlist creation fails
+- Apple Music catalog search has no per-query quota limit
+- The storefront country code should match your Apple Music subscription region (e.g. `us`, `gb`, `de`)
 
 ## HTTP cache
 

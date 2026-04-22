@@ -26,9 +26,9 @@ Sidebar layout:
   Graph Options         — visualization type and edge threshold
 
 Main area (tabs):
-  Results  — filtered DataFrame + CSV download
+  Results  — filtered DataFrame + Excel download
   Graph    — network visualization + PNG download
-  Report   — HTML/ZIP export
+  Report   — ZIP bundle (graph PNG + Excel workbook)
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from __future__ import annotations
 import datetime
 import io
 import os
+import zipfile
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -51,6 +52,7 @@ from discogs_network_explorer.backend import (
     get_label_earliest_year,
     get_label_latest_year,
     get_label_name,
+    get_label_release_count,
     get_master_artist_list,
     get_master_label_rows,
 )
@@ -74,10 +76,6 @@ from discogs_network_explorer.graph_utils import (
     build_artist_label_graph,
     build_label_label_graph,
     draw_graph_matplotlib,
-)
-from discogs_network_explorer.report import (
-    generate_report_html,
-    generate_report_zip,
 )
 from discogs_network_explorer.youtube import (
     add_video_to_playlist,
@@ -523,10 +521,14 @@ filter_max_year = _col_y2.number_input(
 _size_max_possible = int(df_raw.groupby("label_id").size().max()) if not df_raw.empty else 1000
 filter_min_label_size = st.sidebar.number_input(
     "Min label size (rows)", min_value=0, max_value=_size_max_possible, value=0, step=1,
+    help="Upper bound is derived from search results — it equals the row "
+         "count of the largest discovered label in the current dataset.",
 )
 filter_max_label_size = st.sidebar.number_input(
     "Max label size (rows)", min_value=0, max_value=_size_max_possible,
     value=_size_max_possible, step=1,
+    help="Upper bound is derived from search results — it equals the row "
+         "count of the largest discovered label in the current dataset.",
 )
 
 # Format, country, role, genre, style — populated from dataset values.
@@ -776,6 +778,7 @@ def _build_excel_output(
         label_summary_rows.append({
             "label_name":    label_id_to_name.get(lid, lid),
             "label_id":      lid,
+            "releases":      get_label_release_count(lid),
             "artists":       artist_list,
             "overlap_pct":   overlap_pct,
             "earliest_year": yrs.get("earliest", ""),
@@ -981,18 +984,16 @@ with tab_graph:
     else:
         draw_graph_matplotlib(G, ax=ax)
 
-        # Save to buffer BEFORE st.pyplot() — clear_figure=True wipes the
-        # figure immediately after display, producing a blank file if saved after.
-        _graph_buf = __import__("io").BytesIO()
+        _graph_buf = io.BytesIO()
         fig.savefig(_graph_buf, format="png", bbox_inches="tight", dpi=150)
-        _graph_buf.seek(0)
-        st.session_state["graph_fig"] = fig
+        _graph_png_bytes = _graph_buf.getvalue()
+        st.session_state["graph_png"] = _graph_png_bytes
 
         st.pyplot(fig, clear_figure=True)
 
         st.download_button(
             "Download graph as PNG",
-            data=_graph_buf.getvalue(),
+            data=_graph_png_bytes,
             file_name="discogs_graph.png",
             mime="image/png",
         )
@@ -1008,97 +1009,59 @@ with tab_graph:
 with tab_report:
     st.subheader("Export analysis report")
     st.write(
-        "Generate a self-contained HTML report with embedded graph and "
-        "metadata, or download a ZIP bundle containing the HTML, the full "
-        "CSV, and the graph PNG."
+        "Download a ZIP bundle containing the network graph PNG and the "
+        "full Excel results workbook."
     )
 
-    if st.button("Generate report"):
-        _report_fig = st.session_state.get("graph_fig")
+    _report_png = st.session_state.get("graph_png")
 
-        if _report_fig is None:
-            # Build a figure if the Graph tab has not been rendered yet.
-            _report_fig, _ax = plt.subplots(figsize=(10, 7))
-            _rep_label_names = {
-                _lid_str(r["label_id"]): str(r["label_name"]).strip()
-                for r in df_raw.to_dict("records")
-                if r.get("label_id") and r.get("label_name")
-            }
-            _rep_seed_ids = [str(s) for s in _seed_labels_used]
-
-            if network_mode.startswith("Label"):
-                _l2a = build_label_to_artists(df.to_dict("records"))
-                for _sid in _rep_seed_ids:
-                    if not _l2a.get(_sid):
-                        _l2a[_sid] = _l2a_raw.get(_sid, set())
-                _G = build_label_label_graph(
-                    _l2a,
-                    min_shared=min_shared_artists,
-                    label_names=_rep_label_names,
-                    seed_label_ids=_rep_seed_ids,
-                    seed_artist_union=_artists,
-                    label_years=_label_years,
-                )
-            else:
-                _G = build_artist_label_graph(
-                    df.to_dict("records"),
-                    seed_label_ids=_rep_seed_ids,
-                    label_names=_rep_label_names,
-                )
-            if _G.number_of_nodes() > 0:
-                draw_graph_matplotlib(_G, ax=_ax)
-
-        metadata = {
-            "seed_mode":              _seed_mode_used,
-            "seed_label_ids":         _seed_labels_used,
-            "seed_artist_ids":        _seed_artists_used,
-            "fetch_year_range":       f"{fetch_year_min}–{fetch_year_max}",
-            "max_releases_per_label": max_releases_per_label,
-            "max_releases_per_artist":max_releases_per_artist,
-            "min_releases_per_label": min_releases_per_label,
-            "min_releases_per_artist":min_releases_per_artist,
-            "activity_window":        (
-                f"{activity_window_start}–{activity_window_end} "
-                f"(min {activity_min_releases})"
-                if activity_window_on else "off"
-            ),
-            "filter_year_range":      f"{filter_min_year}–{filter_max_year}",
-            "filter_formats":         selected_formats or "all",
-            "filter_countries":       selected_countries or "all",
-            "filter_roles":           selected_roles or "all",
-            "filter_genres":          selected_genres or "all",
-            "filter_styles":          selected_styles or "all",
-            "result_rows":            len(df),
-            "unique_labels":          int(df["label_id"].nunique()),
+    if _report_png is None:
+        _rep_fig, _rep_ax = plt.subplots(figsize=(10, 7))
+        _rep_label_names = {
+            _lid_str(r["label_id"]): str(r["label_name"]).strip()
+            for r in df_raw.to_dict("records")
+            if r.get("label_id") and r.get("label_name")
         }
+        _rep_seed_ids = [str(s) for s in _seed_labels_used]
 
-        html_report = generate_report_html(
-            seed_label_ids=_seed_labels_used,
-            seed_artist_ids=_seed_artists_used,
-            master_artist_pools=list(_artists)[:200],
-            df_results=df,
-            graph_fig=_report_fig,
-            metadata=metadata,
-        )
+        if network_mode.startswith("Label"):
+            _l2a = build_label_to_artists(df.to_dict("records"))
+            for _sid in _rep_seed_ids:
+                if not _l2a.get(_sid):
+                    _l2a[_sid] = _l2a_raw.get(_sid, set())
+            _G = build_label_label_graph(
+                _l2a,
+                min_shared=min_shared_artists,
+                label_names=_rep_label_names,
+                seed_label_ids=_rep_seed_ids,
+                seed_artist_union=_artists,
+                label_years=_label_years,
+            )
+        else:
+            _G = build_artist_label_graph(
+                df.to_dict("records"),
+                seed_label_ids=_rep_seed_ids,
+                label_names=_rep_label_names,
+            )
+        if _G.number_of_nodes() > 0:
+            draw_graph_matplotlib(_G, ax=_rep_ax)
 
-        zip_bytes = generate_report_zip(
-            html_report=html_report,
-            df_results=df,
-            graph_fig=_report_fig,
-        )
+        _rep_buf = io.BytesIO()
+        _rep_fig.savefig(_rep_buf, format="png", bbox_inches="tight", dpi=150)
+        _report_png = _rep_buf.getvalue()
+        plt.close(_rep_fig)
 
-        st.download_button(
-            "Download HTML report",
-            data=html_report.encode("utf-8"),
-            file_name="discogs_report.html",
-            mime="text/html",
-        )
-        st.download_button(
-            "Download ZIP bundle (HTML + CSV + PNG)",
-            data=zip_bytes,
-            file_name="discogs_report.zip",
-            mime="application/zip",
-        )
+    _report_zip_buf = io.BytesIO()
+    with zipfile.ZipFile(_report_zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("graph.png", _report_png)
+        zf.writestr("discogs_results.xlsx", _excel_bytes)
+
+    st.download_button(
+        "Download report (ZIP)",
+        data=_report_zip_buf.getvalue(),
+        file_name="discogs_report.zip",
+        mime="application/zip",
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1112,6 +1075,41 @@ st.caption(
     "Uses community-curated YouTube links from Discogs release pages when "
     "available, falling back to search for releases without links."
 )
+
+
+import re
+from difflib import SequenceMatcher
+
+
+def _normalize_for_match(s: str) -> str:
+    s = s.lower().strip()
+    s = re.sub(r"\s*\(\d+\)\s*$", "", s)  # Discogs disambiguation "(2)"
+    s = re.sub(r"[^\w\s]", "", s)
+    return " ".join(s.split())
+
+
+def _similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, _normalize_for_match(a), _normalize_for_match(b)).ratio()
+
+
+def _score_match(
+    discogs_artist: str,
+    discogs_title: str,
+    result_artist: str,
+    result_title: str,
+) -> tuple[str, float, float]:
+    """Return (verdict, artist_score, title_score).
+
+    Verdict is "accept", "borderline", or "reject".
+    """
+    a = _similarity(discogs_artist, result_artist)
+    t = _similarity(discogs_title, result_title)
+    if a < 0.5:
+        return "reject", a, t
+    if a >= 0.7 and t >= 0.5:
+        return "accept", a, t
+    return "borderline", a, t
+
 
 # ── Platform selector ───────────────────────────────────────────────────────
 
@@ -1384,13 +1382,15 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
         st.stop()
 
     # ── Collect videos/tracks from fetched releases ─────────────────────────
+    # Every item gets a `seq` index so we can restore release order after
+    # the review step merges borderline tracks back in.
 
+    _seq = 0
     video_queue: list[dict] = []
     search_queue: list[dict] = []
     no_embed_count = 0
 
     if dnx_platform == "YouTube":
-        # YouTube path — prefer embedded Discogs video links.
         for rel in all_releases:
             vids = rel.get("videos") or []
             if vids:
@@ -1398,6 +1398,7 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
                     vid_id = _extract_yt_video_id(v["url"])
                     if vid_id:
                         video_queue.append({
+                            "seq":      _seq,
                             "video_id": vid_id,
                             "title":    v["title"],
                             "artist":   rel["artist_name"],
@@ -1405,18 +1406,21 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
                             "label":    rel.get("label_name", ""),
                             "source":   "discogs",
                         })
+                        _seq += 1
             else:
                 tracklist = rel.get("tracklist") or []
                 if tracklist:
                     for track in tracklist:
                         if track["artist"] and track["title"]:
                             search_queue.append({
+                                "seq":     _seq,
                                 "artist":  track["artist"],
                                 "title":   track["title"],
                                 "release": rel["release_title"],
                                 "label":   rel.get("label_name", ""),
                                 "rid":     rel["release_id"],
                             })
+                            _seq += 1
                 no_embed_count += 1
 
         releases_with_vids = len(all_releases) - no_embed_count
@@ -1429,38 +1433,43 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
         )
 
     else:
-        # Apple Music path — all tracks go to search (no embeds on Discogs).
         for rel in all_releases:
             tracklist = rel.get("tracklist") or []
             if tracklist:
                 for track in tracklist:
                     if track["artist"] and track["title"]:
                         search_queue.append({
+                            "seq":     _seq,
                             "artist":  track["artist"],
                             "title":   track["title"],
                             "release": rel["release_title"],
                             "label":   rel.get("label_name", ""),
                             "rid":     rel["release_id"],
                         })
+                        _seq += 1
             else:
-                # No tracklist — use release-level info.
                 if rel["artist_name"] and rel["release_title"]:
                     search_queue.append({
+                        "seq":     _seq,
                         "artist":  rel["artist_name"],
                         "title":   rel["release_title"],
                         "release": rel["release_title"],
                         "label":   rel.get("label_name", ""),
                         "rid":     rel["release_id"],
                     })
+                    _seq += 1
 
         st.info(
             f"Fetched **{len(all_releases)}** releases. "
             f"**{len(search_queue)}** tracks queued for Apple Music search."
         )
 
-    # ── Search fallback (per-track) ───────────────────────────────────────
+    # ── Search fallback (per-track) with match scoring ────────────────────
 
     search_errors: list[str] = []
+    accepted_from_search: list[dict] = []
+    borderline_from_search: list[dict] = []
+    rejected_from_search: list[dict] = []
 
     if dnx_search_fallback and search_queue:
         if dnx_platform == "YouTube":
@@ -1474,14 +1483,29 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
                     search_errors.append(f"{query}: {exc}")
                     result = None
                 if result:
-                    video_queue.append({
-                        "video_id": result["video_id"],
-                        "title":    result["title"],
-                        "artist":   item["artist"],
-                        "release":  item["release"],
-                        "label":    item["label"],
-                        "source":   "yt_search",
-                    })
+                    verdict, a_score, t_score = _score_match(
+                        item["artist"], item["title"],
+                        result.get("artist", ""), result["title"],
+                    )
+                    entry = {
+                        "seq":            item["seq"],
+                        "video_id":       result["video_id"],
+                        "title":          result["title"],
+                        "artist":         item["artist"],
+                        "matched_artist": result.get("artist", ""),
+                        "matched_title":  result["title"],
+                        "release":        item["release"],
+                        "label":          item["label"],
+                        "source":         "yt_search",
+                        "artist_score":   round(a_score, 2),
+                        "title_score":    round(t_score, 2),
+                    }
+                    if verdict == "accept":
+                        accepted_from_search.append(entry)
+                    elif verdict == "borderline":
+                        borderline_from_search.append(entry)
+                    else:
+                        rejected_from_search.append(entry)
                 progress.progress(
                     (idx + 1) / len(search_queue),
                     text=f"YouTube search… {idx + 1}/{len(search_queue)} tracks",
@@ -1489,7 +1513,6 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
             progress.empty()
 
         else:
-            # Apple Music search.
             _am_dev_token = _am_config["developer_token"]
             progress = st.progress(0, text="Searching Apple Music for tracks…")
             for idx, item in enumerate(search_queue):
@@ -1500,14 +1523,29 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
                     search_errors.append(f"{query}: {exc}")
                     result = None
                 if result:
-                    video_queue.append({
-                        "video_id": result["song_id"],
-                        "title":    result["title"],
-                        "artist":   result["artist"],
-                        "release":  item["release"],
-                        "label":    item["label"],
-                        "source":   "am_search",
-                    })
+                    verdict, a_score, t_score = _score_match(
+                        item["artist"], item["title"],
+                        result["artist"], result["title"],
+                    )
+                    entry = {
+                        "seq":            item["seq"],
+                        "video_id":       result["song_id"],
+                        "title":          result["title"],
+                        "artist":         item["artist"],
+                        "matched_artist": result["artist"],
+                        "matched_title":  result["title"],
+                        "release":        item["release"],
+                        "label":          item["label"],
+                        "source":         "am_search",
+                        "artist_score":   round(a_score, 2),
+                        "title_score":    round(t_score, 2),
+                    }
+                    if verdict == "accept":
+                        accepted_from_search.append(entry)
+                    elif verdict == "borderline":
+                        borderline_from_search.append(entry)
+                    else:
+                        rejected_from_search.append(entry)
                 progress.progress(
                     (idx + 1) / len(search_queue),
                     text=f"Apple Music search… {idx + 1}/{len(search_queue)} tracks",
@@ -1518,6 +1556,65 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
             with st.expander(f"Search errors ({len(search_errors)})"):
                 for err in search_errors:
                     st.text(err)
+
+        st.info(
+            f"Search results — **{len(accepted_from_search)}** accepted, "
+            f"**{len(borderline_from_search)}** borderline, "
+            f"**{len(rejected_from_search)}** rejected."
+        )
+
+    # Add auto-accepted search results to main queue.
+    video_queue.extend(accepted_from_search)
+
+    # ── Borderline review ─────────────────────────────────────────────────
+
+    if borderline_from_search:
+        st.subheader("Review borderline matches")
+        st.caption(
+            "These tracks matched with moderate confidence. Check the box "
+            "to include them in the playlist."
+        )
+        review_df = pd.DataFrame([
+            {
+                "Include":        False,
+                "Discogs Artist": b["artist"],
+                "Discogs Track":  b.get("release", ""),
+                "Match Artist":   b["matched_artist"],
+                "Match Track":    b["matched_title"],
+                "Artist Score":   b["artist_score"],
+                "Track Score":    b["title_score"],
+            }
+            for b in borderline_from_search
+        ])
+        edited_df = st.data_editor(
+            review_df,
+            use_container_width=True,
+            hide_index=True,
+            key="dnx_borderline_review",
+            column_config={
+                "Include":      st.column_config.CheckboxColumn("Include", default=False),
+                "Artist Score": st.column_config.NumberColumn(format="%.2f"),
+                "Track Score":  st.column_config.NumberColumn(format="%.2f"),
+            },
+        )
+        for idx, row in edited_df.iterrows():
+            if row["Include"]:
+                video_queue.append(borderline_from_search[idx])
+
+    if rejected_from_search:
+        with st.expander(f"Rejected matches ({len(rejected_from_search)})"):
+            rej_df = pd.DataFrame([
+                {
+                    "Discogs Artist": r["artist"],
+                    "Discogs Track":  r.get("release", ""),
+                    "Match Artist":   r["matched_artist"],
+                    "Match Track":    r["matched_title"],
+                    "Artist Score":   r["artist_score"],
+                    "Track Score":    r["title_score"],
+                }
+                for r in rejected_from_search
+            ])
+            st.dataframe(rej_df, use_container_width=True, hide_index=True)
 
     if not video_queue:
         if not dnx_search_fallback and search_queue:
@@ -1531,7 +1628,9 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
             st.warning("No tracks found to add.")
         st.stop()
 
-    # ── Deduplicate by video_id / song_id ─────────────────────────────────
+    # ── Sort by seq and deduplicate ───────────────────────────────────────
+
+    video_queue.sort(key=lambda v: v["seq"])
 
     seen_ids: set[str] = set()
     unique_queue: list[dict] = []
@@ -1593,7 +1692,6 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
         )
 
     else:
-        # Apple Music — batch add songs to playlist.
         _am_dev_token = _am_config["developer_token"]
 
         playlist_id = am_create_playlist(
@@ -1604,7 +1702,6 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
         )
         st.info(f"Created Apple Music playlist: **{dnx_playlist_name}**")
 
-        # Apple Music supports batch adding — send in chunks of 25.
         added = 0
         failed = 0
         results_log = []

@@ -121,6 +121,7 @@ def search_video(service, query: str) -> dict | None:
     return {
         "video_id": item["id"]["videoId"],
         "title": item["snippet"]["title"],
+        "artist": item["snippet"].get("channelTitle", ""),
     }
 
 

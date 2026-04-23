@@ -273,14 +273,15 @@ def draw_graph_matplotlib(G: nx.Graph, ax: plt.Axes | None = None) -> None:
     if node_sizes:
         max_disc_size = min(max_disc_size, min(node_sizes.values()) - 1)
     if disc_counts:
-        d_max = max(disc_counts.values())
-        d_min = min(disc_counts.values())
+        d_min = max(1, min(disc_counts.values()))
         for n, count in disc_counts.items():
-            frac = (count - d_min) / (d_max - d_min) if d_max > d_min else 0.25
-            node_sizes[n] = MIN_DISC_SIZE + (max_disc_size - MIN_DISC_SIZE) * frac
+            node_sizes[n] = min(max_disc_size, MIN_DISC_SIZE * count / d_min)
 
-    small_graph_scale = max(1.0, 2.5 - len(label_nodes) / 10)
+    _n_labels = len(label_nodes)
+    small_graph_scale = max(1.0, 4.75 - _n_labels * 0.125)
     label_sizes = [node_sizes.get(n, MIN_DISC_SIZE) * small_graph_scale for n in label_nodes]
+
+    label_linewidth = max(2.2, 2.6 - max(0, _n_labels - 6) * 0.0167)
 
     nx.draw_networkx_nodes(
         G, pos, nodelist=artist_nodes,
@@ -289,7 +290,7 @@ def draw_graph_matplotlib(G: nx.Graph, ax: plt.Axes | None = None) -> None:
     nx.draw_networkx_nodes(
         G, pos, nodelist=label_nodes,
         node_size=label_sizes, node_color=label_fill_colors,
-        edgecolors=label_edge_colors, linewidths=2.6, ax=ax,
+        edgecolors=label_edge_colors, linewidths=label_linewidth, ax=ax,
     )
     nx.draw_networkx_edges(G, pos, alpha=0.3, ax=ax)
 
@@ -306,7 +307,8 @@ def draw_graph_matplotlib(G: nx.Graph, ax: plt.Axes | None = None) -> None:
     )
     leg = ax.legend(
         handles=_legend_entries,
-        loc="center left",
+        loc="center right",
+        bbox_to_anchor=(-0.02, 0.5),
         fontsize=5,
         framealpha=0.7,
         handlelength=1.0,

@@ -124,11 +124,12 @@ def build_label_label_graph(
         display = (label_names or {}).get(L) or L
         label_artists = effective_l2a[L]
 
+        n_seed_artists = len(label_artists & seed_union) if seed_union else 0
+
         if is_seed:
             overlap_pct = 1.0
         else:
-            overlap_count = len(label_artists & seed_union) if seed_union else 0
-            overlap_pct = (overlap_count / len(seed_union)) if seed_union else 0.0
+            overlap_pct = (n_seed_artists / len(seed_union)) if seed_union else 0.0
             overlap_pct = min(1.0, overlap_pct)
 
         if not is_seed and overlap_pct < min_overlap_pct:
@@ -136,12 +137,13 @@ def build_label_label_graph(
 
         yrs = (label_years or {}).get(L, {})
         label_attrs[L] = {
-            "kind":          "label",
-            "display":       display,
-            "overlap_pct":   overlap_pct,
-            "is_seed":       is_seed,
-            "earliest_year": yrs.get("earliest"),
-            "latest_year":   yrs.get("latest"),
+            "kind":            "label",
+            "display":         display,
+            "overlap_pct":     overlap_pct,
+            "n_seed_artists":  n_seed_artists,
+            "is_seed":         is_seed,
+            "earliest_year":   yrs.get("earliest"),
+            "latest_year":     yrs.get("latest"),
         }
 
     # Second pass: add nodes, then edges only between labels that both passed.
@@ -241,21 +243,44 @@ def draw_graph_matplotlib(G: nx.Graph, ax: plt.Axes | None = None) -> None:
         _year_to_color(G.nodes[n].get("earliest_year")) for n in label_nodes
     ]
 
-    # Step-function node sizing based on seed-artist overlap percentage.
-    def _step_size(pct: float) -> float:
-        if pct >= 0.50:
-            return 1200.0
-        if pct >= 0.25:
-            return 800.0
-        if pct >= 0.10:
-            return 300.0
-        if pct >= 0.05:
-            return 150.0
-        if pct >= 0.02:
-            return 75.0
-        return 38.0
+    # Node sizing based on number of discovered artists per label.
+    # Seed nodes: linear scale from 70% to 100% of MAX_NODE_SIZE.
+    # Discovered nodes: linear scale from MIN_DISC_SIZE to 50% of MAX_NODE_SIZE,
+    # capped below the smallest seed node.
+    # Small-graph scaling: continuous multiplier for < 15 label nodes to fill
+    # whitespace (2x at 5 nodes, 1.5x at 10, 1x at 15+).
+    MAX_NODE_SIZE = 1200.0
+    MIN_SEED_FRAC = 0.70
+    MAX_DISC_FRAC = 0.50
+    MIN_DISC_SIZE = 38.0
 
-    label_sizes = [_step_size(G.nodes[n].get("overlap_pct", 0.0)) for n in label_nodes]
+    seed_label_nodes = [n for n in label_nodes if G.nodes[n].get("is_seed")]
+    disc_label_nodes = [n for n in label_nodes if not G.nodes[n].get("is_seed")]
+
+    node_sizes: dict[str, float] = {}
+
+    seed_counts = {n: G.nodes[n].get("n_seed_artists", 0) for n in seed_label_nodes}
+    if seed_counts:
+        s_max = max(seed_counts.values())
+        s_min = min(seed_counts.values())
+        min_seed_size = MIN_SEED_FRAC * MAX_NODE_SIZE
+        for n, count in seed_counts.items():
+            frac = (count - s_min) / (s_max - s_min) if s_max > s_min else 1.0
+            node_sizes[n] = min_seed_size + (MAX_NODE_SIZE - min_seed_size) * frac
+
+    disc_counts = {n: G.nodes[n].get("n_seed_artists", 0) for n in disc_label_nodes}
+    max_disc_size = MAX_DISC_FRAC * MAX_NODE_SIZE
+    if node_sizes:
+        max_disc_size = min(max_disc_size, min(node_sizes.values()) - 1)
+    if disc_counts:
+        d_max = max(disc_counts.values())
+        d_min = min(disc_counts.values())
+        for n, count in disc_counts.items():
+            frac = (count - d_min) / (d_max - d_min) if d_max > d_min else 0.25
+            node_sizes[n] = MIN_DISC_SIZE + (max_disc_size - MIN_DISC_SIZE) * frac
+
+    small_graph_scale = max(1.0, 2.5 - len(label_nodes) / 10)
+    label_sizes = [node_sizes.get(n, MIN_DISC_SIZE) * small_graph_scale for n in label_nodes]
 
     nx.draw_networkx_nodes(
         G, pos, nodelist=artist_nodes,
@@ -264,7 +289,7 @@ def draw_graph_matplotlib(G: nx.Graph, ax: plt.Axes | None = None) -> None:
     nx.draw_networkx_nodes(
         G, pos, nodelist=label_nodes,
         node_size=label_sizes, node_color=label_fill_colors,
-        edgecolors=label_edge_colors, linewidths=3.0, ax=ax,
+        edgecolors=label_edge_colors, linewidths=2.6, ax=ax,
     )
     nx.draw_networkx_edges(G, pos, alpha=0.3, ax=ax)
 

@@ -227,8 +227,9 @@ fetch_year_min, fetch_year_max = st.sidebar.slider(
     max_value=CURRENT_YEAR,
     value=(2016, CURRENT_YEAR),
     step=1,
-    help="Only releases within this year range are fetched.  Narrowing the "
-         "window reduces crawl time and dataset size.",
+    help="Only releases within this year range are fetched. This affects "
+         "artist discovery — artists on seed labels who have releases "
+         "outside this range may not be discovered.",
 )
 
 # ── Per-entity release caps ───────────────────────────────────────────────────
@@ -302,6 +303,7 @@ activity_window_on = st.sidebar.checkbox(
 activity_window_start: int = 2016
 activity_window_end: int   = CURRENT_YEAR
 activity_min_releases: int = 1
+activity_min_first_release: int = 0
 
 if activity_window_on:
     activity_window_start, activity_window_end = st.sidebar.slider(
@@ -322,6 +324,16 @@ if activity_window_on:
         step=1,
         help="Number of releases required within the activity window. "
              "Increase to require sustained recent activity.",
+    )
+
+    activity_min_first_release = st.sidebar.slider(
+        "Exclude labels with first release before",
+        min_value=1900,
+        max_value=CURRENT_YEAR,
+        value=1900,
+        step=1,
+        help="Remove any discovered label whose earliest known release "
+             "predates this year. Useful for filtering out older labels.",
     )
 
 
@@ -658,6 +670,17 @@ if activity_window_on and not df.empty:
     if inactive_labels:
         df = df[~df["label_id"].astype(str).isin(inactive_labels)].copy()
 
+    if activity_min_first_release > 1900:
+        old_labels: set[str] = set()
+        for lid in set(df["label_id"].astype(str).unique()):
+            if lid in seed_ids_set:
+                continue
+            earliest = _all_label_years.get(lid, {}).get("earliest")
+            if earliest is not None and earliest < activity_min_first_release:
+                old_labels.add(lid)
+        if old_labels:
+            df = df[~df["label_id"].astype(str).isin(old_labels)].copy()
+
     # Apply the same window to artists when seeds include explicit artist IDs.
     if _seed_mode_used in {"Artists Only", "Labels + Artists"}:
         df = filter_artists_by_activity_window(
@@ -779,6 +802,7 @@ def _build_excel_output(
             "label_name":    label_id_to_name.get(lid, lid),
             "label_id":      lid,
             "releases":      get_label_release_count(lid),
+            "artist_n":      len(aid_map),
             "artists":       artist_list,
             "overlap_pct":   overlap_pct,
             "earliest_year": yrs.get("earliest", ""),
@@ -1106,7 +1130,7 @@ def _score_match(
     t = _similarity(discogs_title, result_title)
     if a < 0.5:
         return "reject", a, t
-    if a >= 0.7 and t >= 0.5:
+    if a >= 0.7 and t >= 0.55:
         return "accept", a, t
     return "borderline", a, t
 
@@ -1388,6 +1412,7 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
     _seq = 0
     video_queue: list[dict] = []
     search_queue: list[dict] = []
+    unobtained: list[dict] = []
     no_embed_count = 0
 
     if dnx_platform == "YouTube":
@@ -1404,6 +1429,7 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
                             "artist":   rel["artist_name"],
                             "release":  rel["release_title"],
                             "label":    rel.get("label_name", ""),
+                            "rid":      rel["release_id"],
                             "source":   "discogs",
                         })
                         _seq += 1
@@ -1477,11 +1503,13 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
             progress = st.progress(0, text="Searching YouTube for individual tracks…")
             for idx, item in enumerate(search_queue):
                 query = f"{item['artist']} - {item['title']}"
+                _search_error = False
                 try:
                     result = search_video(yt_service, query)
                 except Exception as exc:
                     search_errors.append(f"{query}: {exc}")
                     result = None
+                    _search_error = True
                 if result:
                     verdict, a_score, t_score = _score_match(
                         item["artist"], item["title"],
@@ -1496,6 +1524,8 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
                         "matched_title":  result["title"],
                         "release":        item["release"],
                         "label":          item["label"],
+                        "rid":            item["rid"],
+                        "discogs_track":  item["title"],
                         "source":         "yt_search",
                         "artist_score":   round(a_score, 2),
                         "title_score":    round(t_score, 2),
@@ -1506,6 +1536,15 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
                         borderline_from_search.append(entry)
                     else:
                         rejected_from_search.append(entry)
+                else:
+                    unobtained.append({
+                        "artist": item["artist"],
+                        "track": item["title"],
+                        "release": item["release"],
+                        "label": item["label"],
+                        "reason": "search_error" if _search_error else "no_result",
+                        "discogs_url": f"https://www.discogs.com/release/{item['rid']}",
+                    })
                 progress.progress(
                     (idx + 1) / len(search_queue),
                     text=f"YouTube search… {idx + 1}/{len(search_queue)} tracks",
@@ -1517,11 +1556,13 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
             progress = st.progress(0, text="Searching Apple Music for tracks…")
             for idx, item in enumerate(search_queue):
                 query = f"{item['artist']} - {item['title']}"
+                _search_error = False
                 try:
                     result = am_search_song(_am_dev_token, query, storefront=am_storefront)
                 except Exception as exc:
                     search_errors.append(f"{query}: {exc}")
                     result = None
+                    _search_error = True
                 if result:
                     verdict, a_score, t_score = _score_match(
                         item["artist"], item["title"],
@@ -1536,6 +1577,8 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
                         "matched_title":  result["title"],
                         "release":        item["release"],
                         "label":          item["label"],
+                        "rid":            item["rid"],
+                        "discogs_track":  item["title"],
                         "source":         "am_search",
                         "artist_score":   round(a_score, 2),
                         "title_score":    round(t_score, 2),
@@ -1546,6 +1589,15 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
                         borderline_from_search.append(entry)
                     else:
                         rejected_from_search.append(entry)
+                else:
+                    unobtained.append({
+                        "artist": item["artist"],
+                        "track": item["title"],
+                        "release": item["release"],
+                        "label": item["label"],
+                        "reason": "search_error" if _search_error else "no_result",
+                        "discogs_url": f"https://www.discogs.com/release/{item['rid']}",
+                    })
                 progress.progress(
                     (idx + 1) / len(search_queue),
                     text=f"Apple Music search… {idx + 1}/{len(search_queue)} tracks",
@@ -1562,6 +1614,18 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
             f"**{len(borderline_from_search)}** borderline, "
             f"**{len(rejected_from_search)}** rejected."
         )
+
+    # Track items that were never searched (fallback disabled).
+    if not dnx_search_fallback and search_queue:
+        for item in search_queue:
+            unobtained.append({
+                "artist": item["artist"],
+                "track": item["title"],
+                "release": item["release"],
+                "label": item["label"],
+                "reason": "search_off",
+                "discogs_url": f"https://www.discogs.com/release/{item['rid']}",
+            })
 
     # Add auto-accepted search results to main queue.
     video_queue.extend(accepted_from_search)
@@ -1600,6 +1664,16 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
         for idx, row in edited_df.iterrows():
             if row["Include"]:
                 video_queue.append(borderline_from_search[idx])
+            else:
+                b = borderline_from_search[idx]
+                unobtained.append({
+                    "artist": b["artist"],
+                    "track": b.get("discogs_track", b.get("matched_title", "")),
+                    "release": b["release"],
+                    "label": b["label"],
+                    "reason": "declined",
+                    "discogs_url": f"https://www.discogs.com/release/{b.get('rid', '')}",
+                })
 
     if rejected_from_search:
         with st.expander(f"Rejected matches ({len(rejected_from_search)})"):
@@ -1615,6 +1689,15 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
                 for r in rejected_from_search
             ])
             st.dataframe(rej_df, use_container_width=True, hide_index=True)
+        for r in rejected_from_search:
+            unobtained.append({
+                "artist": r["artist"],
+                "track": r.get("discogs_track", r.get("matched_title", "")),
+                "release": r["release"],
+                "label": r["label"],
+                "reason": "rejected",
+                "discogs_url": f"https://www.discogs.com/release/{r.get('rid', '')}",
+            })
 
     if not video_queue:
         if not dnx_search_fallback and search_queue:
@@ -1642,11 +1725,39 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
 
     # ── Build playlist ──────────────────────────────────────────────────────
 
-    _playlist_description = (
-        f"Auto-generated by dnx (Discogs Network Xtractor) on "
-        f"{datetime.date.today().isoformat()}. "
-        f"{len(video_queue)} tracks from {len(all_releases)} releases."
-    )
+    _desc_lines = [
+        f"Generated with love and the power of *magic gatorade* by dnx, "
+        f"{len(video_queue)} tracks from {len(all_releases)} releases.",
+    ]
+
+    if unobtained:
+        _desc_lines.append("")
+        _desc_lines.append(f"Unobtained tracks ({len(unobtained)}):")
+        _desc_lines.append("")
+
+        _by_url: dict[str, list[str]] = {}
+        _url_to_release: dict[str, str] = {}
+        for u in unobtained:
+            url = u.get("discogs_url", "") or "unknown"
+            if url not in _by_url:
+                _by_url[url] = []
+                _url_to_release[url] = u.get("release", "")
+            _by_url[url].append(f"  {u['artist']} – {u['track']}")
+
+        for url, tracks in _by_url.items():
+            release = _url_to_release[url]
+            _desc_lines.append(release)
+            if url != "unknown":
+                _desc_lines.append(url)
+            _desc_lines.extend(tracks)
+            _desc_lines.append("")
+
+    _playlist_description = "\n".join(_desc_lines)
+    if len(_playlist_description) > 4500:
+        _playlist_description = (
+            _playlist_description[:4450]
+            + "\n\n... (truncated — see dnx_unobtained.csv for full list)"
+        )
 
     if dnx_platform == "YouTube":
         yt_service = get_youtube_service(_yt_creds)
@@ -1743,3 +1854,37 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
         log_df = pd.DataFrame(results_log)
         display_cols = [c for c in ["artist", "release", "title", "source", "status", "video_id", "label"] if c in log_df.columns]
         st.dataframe(log_df[display_cols], use_container_width=True)
+
+    # ── Unobtained tracks report ─────────────────────────────────────────
+    # Add tracks that failed playlist insertion.
+    for v in results_log:
+        if v.get("status") == "failed":
+            unobtained.append({
+                "artist": v.get("artist", ""),
+                "track": v.get("discogs_track", v.get("title", "")),
+                "release": v.get("release", ""),
+                "label": v.get("label", ""),
+                "reason": "insert_failed",
+                "discogs_url": f"https://www.discogs.com/release/{v['rid']}" if v.get("rid") else "",
+            })
+
+    total_tracks = sum(len(rel.get("tracklist") or []) for rel in all_releases)
+
+    if unobtained:
+        st.subheader(f"Unobtained tracks ({len(unobtained)} of ~{total_tracks} total)")
+        st.caption(
+            "Tracks from fetched releases that were not added to the playlist. "
+            "Use the Discogs links to find and listen to these tracks manually."
+        )
+        unobtained_df = pd.DataFrame(unobtained)
+        display_order = [c for c in ["artist", "track", "release", "label", "reason", "discogs_url"] if c in unobtained_df.columns]
+        st.dataframe(unobtained_df[display_order], use_container_width=True, hide_index=True)
+        _unobtained_csv = unobtained_df[display_order].to_csv(index=False)
+        st.download_button(
+            "Download unobtained tracks (CSV)",
+            data=_unobtained_csv,
+            file_name="dnx_unobtained.csv",
+            mime="text/csv",
+        )
+    else:
+        st.success(f"All ~{total_tracks} tracks obtained.")

@@ -34,6 +34,7 @@ dne_outputs/
 # Project notes / session files (not part of the app)
 changes.txt
 session_notes.md
+lost_updates.txt
 *.png
 !dne_app.png
 

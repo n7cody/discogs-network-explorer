@@ -26,9 +26,9 @@ Sidebar layout:
   Graph Options         — visualization type and edge threshold
 
 Main area (tabs):
-  Results  — filtered DataFrame + Excel download
+  Results  — filtered DataFrame + CSV download
   Graph    — network visualization + PNG download
-  Report   — ZIP bundle (graph PNG + Excel workbook)
+  Report   — ZIP bundle (graph PNG + CSV results)
 """
 
 from __future__ import annotations
@@ -713,10 +713,10 @@ st.caption(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EXCEL OUTPUT BUILDER
+# CSV OUTPUT BUILDER
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_excel_output(
+def _build_csv_outputs(
     df_results: pd.DataFrame,
     df_raw: pd.DataFrame,
     artists: set[str],
@@ -726,79 +726,80 @@ def _build_excel_output(
     label_names: dict[str, str],
     params: dict,
     label_years: dict[str, dict[str, int | None]] | None = None,
-) -> bytes:
+) -> dict[str, str]:
     """
-    Build a 3-sheet Excel workbook and return it as bytes.
+    Build 3 CSV outputs and return as {filename: csv_string}.
 
-    Sheet 1 — Seed & Run Info
-        Seed label IDs/names, search parameters, discovered artist IDs/names.
-
-    Sheet 2 — Release Summary
-        Every filtered release row (same content as the old CSV export).
-
-    Sheet 3 — Discovered Labels
-        One row per label found during the crawl, with columns:
-        label_name, label_id, artists (comma-separated names of seed-pool
-        artists on that label), overlap_pct (% of seed-pool artists present).
+    seed_info.csv         — seed labels, search parameters, discovered artists.
+    all_releases.csv      — every crawled release row with resolved artist names.
+    discovered_labels.csv — one row per label with artist overlap, year data,
+                            and per-seed-label artist breakdown columns.
     """
-    # Build artist_id → canonical artist name via the API.
-    # Release-credit names vary per release (aliases, collaborations, etc.),
-    # so we always use the canonical name from /artists/{id}.  With HTTP
-    # caching enabled, each lookup is cached after the first call.
     artist_name_map: dict[str, str] = {}
     for aid in list(artists):
         artist_name_map[aid] = get_artist_name(aid)
 
-    # ── Sheet 1 data ──────────────────────────────────────────────────────────
-    seed_label_rows = [
-        {"label_id": lid, "label_name": label_names.get(lid, lid)}
-        for lid in seed_label_ids_used
-    ]
-    seed_artist_rows = [
-        {"artist_id": aid, "artist_name": artist_name_map.get(aid, f"artist_{aid}")}
-        for aid in seed_artist_ids_used
-    ] if seed_artist_ids_used else []
+    # ── Seed Info ────────────────────────────────────────────────────────────
+    info_rows: list[dict] = []
+    for lid in seed_label_ids_used:
+        info_rows.append({
+            "section": "Seed Labels",
+            "field": "label",
+            "id": lid,
+            "value": label_names.get(lid, lid),
+        })
+    for aid in seed_artist_ids_used:
+        info_rows.append({
+            "section": "Seed Artists",
+            "field": "artist",
+            "id": aid,
+            "value": artist_name_map.get(aid, f"artist_{aid}"),
+        })
+    for k, v in params.items():
+        info_rows.append({
+            "section": "Search Parameters",
+            "field": k,
+            "id": "",
+            "value": str(v),
+        })
+    _artist_section = (
+        "Input Artists" if seed_mode_used == "Artists Only" else "Discovered Artists"
+    )
+    for aid in sorted(artists):
+        info_rows.append({
+            "section": _artist_section,
+            "field": "artist",
+            "id": aid,
+            "value": artist_name_map.get(aid, f"artist_{aid}"),
+        })
 
-    params_rows = [{"parameter": k, "value": str(v)} for k, v in params.items()]
-
-    discovered_artist_rows = [
-        {
-            "artist_id":   aid,
-            "artist_name": artist_name_map.get(aid, f"artist_{aid}"),
-        }
-        for aid in sorted(artists)
-    ]
-
-    # ── Sheet 3 data ──────────────────────────────────────────────────────────
-    # Build label → {artist_id: artist_name} from df_raw, keeping only
-    # artists that are in the seed pool (_artists).
+    # ── Discovered Labels ────────────────────────────────────────────────────
     label_id_to_name: dict[str, str] = {}
-    l2a_names: dict[str, dict[str, str]] = {}  # label_id → {aid: aname}
+    l2a_names: dict[str, dict[str, str]] = {}
     for rec in df_raw.to_dict("records"):
         lid   = str(rec.get("label_id", "")).strip()
         lname = str(rec.get("label_name", "")).strip()
         aid   = str(rec.get("artist_id", "")).strip()
-        aname = str(rec.get("artist_name", "")).strip()
         if not lid:
             continue
         label_id_to_name.setdefault(lid, lname)
         if aid in artists:
-            l2a_names.setdefault(lid, {})[aid] = artist_name_map.get(aid, aname or f"artist_{aid}")
+            l2a_names.setdefault(lid, {})[aid] = artist_name_map.get(aid, f"artist_{aid}")
+
+    seed_aid_sets: dict[str, set[str]] = {}
+    for rec in df_raw.to_dict("records"):
+        lid = str(rec.get("label_id", "")).strip()
+        aid = str(rec.get("artist_id", "")).strip()
+        if lid in set(seed_label_ids_used) and aid in artists:
+            seed_aid_sets.setdefault(lid, set()).add(aid)
 
     seed_count = len(artists) if artists else 1
-    label_summary_rows = []
+    label_summary_rows: list[dict] = []
     for lid, aid_map in sorted(l2a_names.items(), key=lambda x: len(x[1]), reverse=True):
-        # overlap_pct = (unique seed artists on this label) /
-        #               (total discovered artists) × 100.
-        # The ideal denominator would be the label's full artist roster,
-        # but resolving it requires ~30 extra API calls per label (~45 min
-        # for 83 labels), so we use the seed-pool size as the denominator.
         overlap_pct = round(len(aid_map) / seed_count * 100, 2)
-        # Use set() to deduplicate names — different artist IDs can share
-        # a name (e.g. two "Various" placeholders), causing repeats otherwise.
         artist_list = ", ".join(sorted(set(aid_map.values())))
         yrs = (label_years or {}).get(lid, {})
-        label_summary_rows.append({
+        row_dict: dict = {
             "label_name":    label_id_to_name.get(lid, lid),
             "label_id":      lid,
             "releases":      get_label_release_count(lid),
@@ -807,60 +808,34 @@ def _build_excel_output(
             "overlap_pct":   overlap_pct,
             "earliest_year": yrs.get("earliest", ""),
             "latest_year":   yrs.get("latest", ""),
-        })
+        }
+        disc_artist_ids = set(aid_map.keys())
+        for slid in seed_label_ids_used:
+            seed_name = label_names.get(slid, slid)
+            col_name = f"{seed_name}_artists"
+            overlap = disc_artist_ids & seed_aid_sets.get(slid, set())
+            if overlap:
+                names = sorted(set(artist_name_map.get(a, f"artist_{a}") for a in overlap))
+                row_dict[col_name] = f"[total={len(overlap)}] " + ", ".join(names)
+            else:
+                row_dict[col_name] = ""
+        label_summary_rows.append(row_dict)
 
-    # ── Write workbook ────────────────────────────────────────────────────────
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        sname1 = "Seed & Run Info"
-
-        # Helper: write a bold-ish section header by putting text in col A,
-        # then write a DataFrame starting on the next row.
-        def _write_section(title: str, df_section: pd.DataFrame, start_row: int) -> int:
-            pd.DataFrame([[title]]).to_excel(
-                writer, sheet_name=sname1, startrow=start_row,
-                index=False, header=False,
-            )
-            df_section.to_excel(
-                writer, sheet_name=sname1, startrow=start_row + 1, index=False,
-            )
-            return start_row + 1 + len(df_section) + 2  # +1 header +2 blank gap
-
-        row = 0
-        row = _write_section("Seed Labels", pd.DataFrame(seed_label_rows), row)
-        if seed_artist_rows:
-            row = _write_section("Seed Artists", pd.DataFrame(seed_artist_rows), row)
-        row = _write_section("Search Parameters", pd.DataFrame(params_rows), row)
-        _artist_section_title = (
-            "Input Artists"
-            if seed_mode_used == "Artists Only"
-            else "Discovered Artists"
-        )
-        _write_section(
-            f"{_artist_section_title} ({len(discovered_artist_rows)})",
-            pd.DataFrame(discovered_artist_rows),
-            row,
+    # ── All Releases ─────────────────────────────────────────────────────────
+    df_raw_out = df_raw.copy()
+    if "artist_name" in df_raw_out.columns and "artist_id" in df_raw_out.columns:
+        df_raw_out["artist_name"] = df_raw_out.apply(
+            lambda r: artist_name_map.get(str(r["artist_id"]).strip(), r["artist_name"])
+            if str(r.get("artist_name", "")).startswith("artist_")
+            else r["artist_name"],
+            axis=1,
         )
 
-        # Sheet 2 — All Releases: all crawled rows with placeholder artist
-        # names resolved to true names using the same artist_name_map built above.
-        df_raw_out = df_raw.copy()
-        if "artist_name" in df_raw_out.columns and "artist_id" in df_raw_out.columns:
-            df_raw_out["artist_name"] = df_raw_out.apply(
-                lambda r: artist_name_map.get(str(r["artist_id"]).strip(), r["artist_name"])
-                if str(r.get("artist_name", "")).startswith("artist_")
-                else r["artist_name"],
-                axis=1,
-            )
-        df_raw_out.to_excel(writer, sheet_name="All Releases", index=False)
-
-        # Sheet 3 — Discovered Labels
-        pd.DataFrame(label_summary_rows).to_excel(
-            writer, sheet_name="Discovered Labels", index=False,
-        )
-
-    buf.seek(0)
-    return buf.read()
+    return {
+        "seed_info.csv": pd.DataFrame(info_rows).to_csv(index=False),
+        "all_releases.csv": df_raw_out.to_csv(index=False),
+        "discovered_labels.csv": pd.DataFrame(label_summary_rows).to_csv(index=False),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -928,7 +903,7 @@ with tab_results:
             "filter_genres":      ", ".join(selected_genres) or "all",
             "filter_styles":      ", ".join(selected_styles) or "all",
         }
-        _excel_bytes = _build_excel_output(
+        _csv_outputs = _build_csv_outputs(
             df_results=df,
             df_raw=df_raw,
             artists=_artists,
@@ -939,11 +914,15 @@ with tab_results:
             params=_excel_params,
             label_years=_label_years,
         )
+        _results_zip_buf = io.BytesIO()
+        with zipfile.ZipFile(_results_zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for _fname, _content in _csv_outputs.items():
+                zf.writestr(_fname, _content)
         st.download_button(
-            "Download results as Excel (.xlsx)",
-            data=_excel_bytes,
-            file_name="discogs_results.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "Download results (CSV)",
+            data=_results_zip_buf.getvalue(),
+            file_name="discogs_results.zip",
+            mime="application/zip",
         )
 
     with col_right:
@@ -1078,7 +1057,8 @@ with tab_report:
     _report_zip_buf = io.BytesIO()
     with zipfile.ZipFile(_report_zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("graph.png", _report_png)
-        zf.writestr("discogs_results.xlsx", _excel_bytes)
+        for _fname, _content in _csv_outputs.items():
+            zf.writestr(_fname, _content)
 
     st.download_button(
         "Download report (ZIP)",
@@ -1139,14 +1119,17 @@ def _score_match(
 
 dnx_platform = st.radio(
     "Platform",
-    ["YouTube", "Apple Music"],
+    ["YouTube", "Apple Music", "Apple+YT"],
     horizontal=True,
     key="dnx_platform",
 )
 
 # ── YouTube authentication ──────────────────────────────────────────────────
 
-if dnx_platform == "YouTube":
+_yt_connected = False
+_yt_creds = None
+
+if dnx_platform in ("YouTube", "Apple+YT"):
     _yt_creds = load_credentials()
     _yt_connected = _yt_creds is not None
 
@@ -1182,12 +1165,14 @@ if dnx_platform == "YouTube":
                 except Exception as exc:
                     st.error(f"YouTube authorization failed: {exc}")
 
-    if not _yt_connected:
-        st.stop()
-
 # ── Apple Music authentication ──────────────────────────────────────────────
 
-if dnx_platform == "Apple Music":
+_am_connected = False
+_am_config = None
+_am_user_token = None
+am_storefront = "us"
+
+if dnx_platform in ("Apple Music", "Apple+YT"):
     _am_config = am_load_config()
     _am_user_token = am_load_user_token()
     _am_connected = _am_config is not None and _am_user_token is not None
@@ -1250,14 +1235,19 @@ if dnx_platform == "Apple Music":
                     except Exception as exc:
                         st.error(f"Apple Music setup failed: {exc}")
 
-    if not _am_connected:
-        st.stop()
+    if _am_connected:
+        am_storefront = st.text_input(
+            "Apple Music storefront",
+            value="us",
+            help="ISO 3166-1 alpha-2 country code for your Apple Music subscription (e.g. us, gb, de).",
+        )
 
-    am_storefront = st.text_input(
-        "Apple Music storefront",
-        value="us",
-        help="ISO 3166-1 alpha-2 country code for your Apple Music subscription (e.g. us, gb, de).",
-    )
+# ── Auth check ─────────────────────────────────────────────────────────────
+
+_needs_yt = dnx_platform in ("YouTube", "Apple+YT")
+_needs_am = dnx_platform in ("Apple Music", "Apple+YT")
+if (_needs_yt and not _yt_connected) or (_needs_am and not _am_connected):
+    st.stop()
 
 # ── dnx input ───────────────────────────────────────────────────────────────
 
@@ -1318,17 +1308,32 @@ with dnx_col2:
         help="Only include releases up to this year.",
     )
 
-dnx_search_fallback = st.checkbox(
-    f"{'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'} search fallback for releases without Discogs video links",
-    value=False if dnx_platform == "YouTube" else True,
-    help=(
+if dnx_platform == "Apple+YT":
+    _fb_label = "YouTube search fallback for tracks without Apple Music match or Discogs video links"
+    _fb_default = False
+    _fb_help = (
+        "When enabled, tracks not found on Apple Music and without embedded "
+        "YouTube links on Discogs will be searched on YouTube by artist + title. "
+        "Costs 100 YouTube API quota units per search (daily limit: 10,000)."
+    )
+elif dnx_platform == "YouTube":
+    _fb_label = "YouTube search fallback for releases without Discogs video links"
+    _fb_default = False
+    _fb_help = (
         "When enabled, releases without embedded YouTube links on their "
         "Discogs page will be searched by artist + title. "
-        + ("Costs 100 YouTube API quota units per search (daily limit: 10,000)."
-           if dnx_platform == "YouTube"
-           else "Apple Music catalog search has no quota limit.")
-    ),
-)
+        "Costs 100 YouTube API quota units per search (daily limit: 10,000)."
+    )
+else:
+    _fb_label = "Apple Music search fallback for releases without Discogs video links"
+    _fb_default = True
+    _fb_help = (
+        "When enabled, releases without embedded YouTube links on their "
+        "Discogs page will be searched by artist + title. "
+        "Apple Music catalog search has no quota limit."
+    )
+
+dnx_search_fallback = st.checkbox(_fb_label, value=_fb_default, help=_fb_help)
 
 dnx_playlist_name = st.text_input(
     "Playlist name",
@@ -1345,7 +1350,8 @@ def _extract_yt_video_id(url: str) -> str | None:
     return m.group(1) if m else None
 
 
-if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'} Playlist", type="primary"):
+_btn_labels = {"YouTube": "Build YouTube Playlist", "Apple Music": "Build Apple Music Playlist", "Apple+YT": "Build Apple+YT Playlists"}
+if st.button(_btn_labels[dnx_platform], type="primary"):
     entries = [e.strip() for e in dnx_raw.split(",") if e.strip()]
     if not entries:
         st.error("Enter at least one label or artist.")
@@ -1458,6 +1464,56 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
             + (f" ({len(search_queue)} tracks queued for search)." if search_queue else ".")
         )
 
+    elif dnx_platform == "Apple+YT":
+        _release_embeds: dict[str, list[dict]] = {}
+        for rel in all_releases:
+            rid = rel["release_id"]
+            vids = rel.get("videos") or []
+            for v in vids:
+                vid_id = _extract_yt_video_id(v["url"])
+                if vid_id:
+                    _release_embeds.setdefault(rid, []).append({
+                        "video_id": vid_id,
+                        "title":    v["title"],
+                        "artist":   rel["artist_name"],
+                        "release":  rel["release_title"],
+                        "label":    rel.get("label_name", ""),
+                        "rid":      rid,
+                        "source":   "discogs",
+                    })
+            tracklist = rel.get("tracklist") or []
+            if tracklist:
+                for track in tracklist:
+                    if track["artist"] and track["title"]:
+                        search_queue.append({
+                            "seq":     _seq,
+                            "artist":  track["artist"],
+                            "title":   track["title"],
+                            "release": rel["release_title"],
+                            "label":   rel.get("label_name", ""),
+                            "rid":     rid,
+                        })
+                        _seq += 1
+            else:
+                if rel["artist_name"] and rel["release_title"]:
+                    search_queue.append({
+                        "seq":     _seq,
+                        "artist":  rel["artist_name"],
+                        "title":   rel["release_title"],
+                        "release": rel["release_title"],
+                        "label":   rel.get("label_name", ""),
+                        "rid":     rid,
+                    })
+                    _seq += 1
+
+        _embeds_total = sum(len(v) for v in _release_embeds.values())
+        st.info(
+            f"Fetched **{len(all_releases)}** releases. "
+            f"**{len(search_queue)}** tracks queued for Apple Music search. "
+            f"**{_embeds_total}** Discogs video embeds across "
+            f"**{len(_release_embeds)}** releases available for YouTube fallback."
+        )
+
     else:
         for rel in all_releases:
             tracklist = rel.get("tracklist") or []
@@ -1497,7 +1553,156 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
     borderline_from_search: list[dict] = []
     rejected_from_search: list[dict] = []
 
-    if dnx_search_fallback and search_queue:
+    if dnx_platform == "Apple+YT" and search_queue:
+        _am_dev_token = _am_config["developer_token"]
+        _am_unfound: list[dict] = []
+
+        progress = st.progress(0, text="Searching Apple Music…")
+        for idx, item in enumerate(search_queue):
+            query = f"{item['artist']} - {item['title']}"
+            _search_error = False
+            try:
+                result = am_search_song(_am_dev_token, query, storefront=am_storefront)
+            except Exception as exc:
+                search_errors.append(f"AM: {query}: {exc}")
+                result = None
+                _search_error = True
+            if result:
+                verdict, a_score, t_score = _score_match(
+                    item["artist"], item["title"],
+                    result["artist"], result["title"],
+                )
+                entry = {
+                    "seq":            item["seq"],
+                    "video_id":       result["song_id"],
+                    "title":          result["title"],
+                    "artist":         item["artist"],
+                    "matched_artist": result["artist"],
+                    "matched_title":  result["title"],
+                    "release":        item["release"],
+                    "label":          item["label"],
+                    "rid":            item["rid"],
+                    "discogs_track":  item["title"],
+                    "source":         "am_search",
+                    "artist_score":   round(a_score, 2),
+                    "title_score":    round(t_score, 2),
+                }
+                if verdict == "accept":
+                    accepted_from_search.append(entry)
+                elif verdict == "borderline":
+                    borderline_from_search.append(entry)
+                else:
+                    _am_unfound.append(item)
+            else:
+                _am_unfound.append(item)
+            progress.progress(
+                (idx + 1) / len(search_queue),
+                text=f"Apple Music search… {idx + 1}/{len(search_queue)} tracks",
+            )
+        progress.empty()
+
+        _am_accepted_n = len(accepted_from_search)
+        _am_borderline_n = len(borderline_from_search)
+        st.info(
+            f"Apple Music: **{_am_accepted_n}** accepted, "
+            f"**{_am_borderline_n}** borderline, "
+            f"**{len(_am_unfound)}** not found — routing to YouTube."
+        )
+
+        _covered_rids: set[str] = set()
+        _yt_search_remaining: list[dict] = []
+        for item in _am_unfound:
+            rid = str(item["rid"])
+            if rid in _release_embeds and rid not in _covered_rids:
+                for embed in _release_embeds[rid]:
+                    embed_entry = dict(embed)
+                    embed_entry["seq"] = _seq
+                    _seq += 1
+                    video_queue.append(embed_entry)
+                _covered_rids.add(rid)
+            else:
+                if rid not in _covered_rids:
+                    _yt_search_remaining.append(item)
+
+        if video_queue:
+            st.info(f"Found **{len(video_queue)}** Discogs video embeds for YouTube playlist.")
+
+        if dnx_search_fallback and _yt_search_remaining:
+            yt_service = get_youtube_service(_yt_creds)
+            progress = st.progress(0, text="Searching YouTube for remaining tracks…")
+            for idx, item in enumerate(_yt_search_remaining):
+                query = f"{item['artist']} - {item['title']}"
+                _search_error = False
+                try:
+                    result = search_video(yt_service, query)
+                except Exception as exc:
+                    search_errors.append(f"YT: {query}: {exc}")
+                    result = None
+                    _search_error = True
+                if result:
+                    verdict, a_score, t_score = _score_match(
+                        item["artist"], item["title"],
+                        result.get("artist", ""), result["title"],
+                    )
+                    entry = {
+                        "seq":            item["seq"],
+                        "video_id":       result["video_id"],
+                        "title":          result["title"],
+                        "artist":         item["artist"],
+                        "matched_artist": result.get("artist", ""),
+                        "matched_title":  result["title"],
+                        "release":        item["release"],
+                        "label":          item["label"],
+                        "rid":            item["rid"],
+                        "discogs_track":  item["title"],
+                        "source":         "yt_search",
+                        "artist_score":   round(a_score, 2),
+                        "title_score":    round(t_score, 2),
+                    }
+                    if verdict == "accept":
+                        accepted_from_search.append(entry)
+                    elif verdict == "borderline":
+                        borderline_from_search.append(entry)
+                    else:
+                        rejected_from_search.append(entry)
+                else:
+                    unobtained.append({
+                        "artist": item["artist"],
+                        "track": item["title"],
+                        "release": item["release"],
+                        "label": item["label"],
+                        "reason": "search_error" if _search_error else "no_result",
+                        "discogs_url": f"https://www.discogs.com/release/{item['rid']}",
+                    })
+                progress.progress(
+                    (idx + 1) / len(_yt_search_remaining),
+                    text=f"YouTube search… {idx + 1}/{len(_yt_search_remaining)} tracks",
+                )
+            progress.empty()
+        elif not dnx_search_fallback:
+            for item in _yt_search_remaining:
+                unobtained.append({
+                    "artist": item["artist"],
+                    "track": item["title"],
+                    "release": item["release"],
+                    "label": item["label"],
+                    "reason": "search_off",
+                    "discogs_url": f"https://www.discogs.com/release/{item['rid']}",
+                })
+
+        if search_errors:
+            with st.expander(f"Search errors ({len(search_errors)})"):
+                for err in search_errors:
+                    st.text(err)
+
+        st.info(
+            f"Combined: **{len(accepted_from_search)}** accepted, "
+            f"**{len(borderline_from_search)}** borderline, "
+            f"**{len(rejected_from_search)}** rejected."
+        )
+        search_queue = []
+
+    elif dnx_search_fallback and search_queue:
         if dnx_platform == "YouTube":
             yt_service = get_youtube_service(_yt_creds)
             progress = st.progress(0, text="Searching YouTube for individual tracks…")
@@ -1701,7 +1906,7 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
 
     if not video_queue:
         if not dnx_search_fallback and search_queue:
-            _platform_label = "YouTube" if dnx_platform == "YouTube" else "Apple Music"
+            _platform_label = {"YouTube": "YouTube", "Apple Music": "Apple Music", "Apple+YT": "YouTube"}[dnx_platform]
             st.warning(
                 f"No tracks found. "
                 f"Enable **search fallback** above to search {_platform_label} "
@@ -1801,6 +2006,96 @@ if st.button(f"Build {'YouTube' if dnx_platform == 'YouTube' else 'Apple Music'}
             f"**{failed}** failed. "
             f"[Open playlist]({playlist_url})"
         )
+
+    elif dnx_platform == "Apple+YT":
+        _am_dev_token = _am_config["developer_token"]
+        yt_service = get_youtube_service(_yt_creds)
+
+        am_items = [v for v in video_queue if v.get("source") == "am_search"]
+        yt_items = [v for v in video_queue if v.get("source") in ("discogs", "yt_search")]
+
+        results_log: list[dict] = []
+        added = 0
+        failed = 0
+        yt_playlist_url = ""
+
+        if yt_items:
+            yt_playlist_id = create_playlist(
+                yt_service,
+                title=f"{dnx_playlist_name} (YT)",
+                description=_playlist_description,
+            )
+            yt_playlist_url = f"https://www.youtube.com/playlist?list={yt_playlist_id}"
+            st.info(f"Created YouTube playlist: [{dnx_playlist_name} (YT)]({yt_playlist_url})")
+
+            yt_added = 0
+            yt_failed = 0
+            progress = st.progress(0, text="Adding videos to YouTube playlist…")
+            for idx, v in enumerate(yt_items):
+                try:
+                    add_video_to_playlist(yt_service, yt_playlist_id, v["video_id"])
+                    yt_added += 1
+                    v["status"] = "added"
+                except Exception:
+                    yt_failed += 1
+                    v["status"] = "failed"
+                results_log.append(v)
+                progress.progress(
+                    (idx + 1) / len(yt_items),
+                    text=f"YouTube… {idx + 1}/{len(yt_items)} ({yt_added} added)",
+                )
+            progress.empty()
+            added += yt_added
+            failed += yt_failed
+
+        am_description = _playlist_description
+        if yt_playlist_url:
+            am_description += f"\n\nYouTube companion playlist:\n{yt_playlist_url}"
+        if len(am_description) > 4500:
+            am_description = am_description[:4450] + "\n\n... (truncated)"
+
+        if am_items:
+            am_playlist_id = am_create_playlist(
+                _am_dev_token,
+                _am_user_token,
+                title=dnx_playlist_name,
+                description=am_description,
+            )
+            st.info(f"Created Apple Music playlist: **{dnx_playlist_name}**")
+
+            am_added = 0
+            am_failed = 0
+            chunk_size = 25
+            progress = st.progress(0, text="Adding songs to Apple Music playlist…")
+            for chunk_start in range(0, len(am_items), chunk_size):
+                chunk = am_items[chunk_start:chunk_start + chunk_size]
+                song_ids = [v["video_id"] for v in chunk]
+                try:
+                    am_add_songs_to_playlist(
+                        _am_dev_token, _am_user_token, am_playlist_id, song_ids,
+                    )
+                    for v in chunk:
+                        v["status"] = "added"
+                        am_added += 1
+                except Exception:
+                    for v in chunk:
+                        v["status"] = "failed"
+                        am_failed += 1
+                results_log.extend(chunk)
+                progress.progress(
+                    min(chunk_start + chunk_size, len(am_items)) / len(am_items),
+                    text=f"Apple Music… {min(chunk_start + chunk_size, len(am_items))}/{len(am_items)} ({am_added} added)",
+                )
+            progress.empty()
+            added += am_added
+            failed += am_failed
+
+        _yt_added_n = sum(1 for r in results_log if r.get("source") in ("discogs", "yt_search") and r["status"] == "added")
+        _am_added_n = sum(1 for r in results_log if r.get("source") == "am_search" and r["status"] == "added")
+        _summary = f"Done — **{added}** tracks added ({_am_added_n} Apple Music, {_yt_added_n} YouTube), **{failed}** failed."
+        if yt_playlist_url:
+            _summary += f" [Open YouTube playlist]({yt_playlist_url})"
+        st.success(_summary)
 
     else:
         _am_dev_token = _am_config["developer_token"]

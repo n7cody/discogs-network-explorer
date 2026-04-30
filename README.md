@@ -177,7 +177,7 @@ Enable **Cache HTTP responses** in the sidebar to store API responses in `discog
 
 ## Privacy Policy
 
-See [PRIVACY_POLICY.md](PRIVACY_POLICY.md) for details on how dne/dnx handles data and API credentials.
+See [privacy_policy.md](privacy_policy.md) for details on how dne/dnx handles data and API credentials.
 
 ## Development
 

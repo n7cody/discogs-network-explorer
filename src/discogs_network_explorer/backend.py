@@ -609,6 +609,9 @@ def get_master_label_rows(
             for lab in details["labels"]:
                 lid = lab["id"]
 
+                if (lab.get("name") or "").startswith("Not On Label"):
+                    continue
+
                 # Pre-screen each newly-encountered non-seed label by its
                 # global Discogs catalog size.  One cached API call per label.
                 if (

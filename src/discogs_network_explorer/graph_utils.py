@@ -27,10 +27,10 @@ import matplotlib.patches as mpatches
 _YEAR_COLOR_SCALE: list[tuple[int, int, str]] = [
     (2026, 2026, "#b150b0"),
     (2025, 2025, "#9750b1"),
-    (2023, 2024, "#7750b1"),
-    (2022, 2022, "#5950b1"),
-    (2021, 2021, "#5064b1"),
-    (2020, 2020, "#5089b1"),
+    (2024, 2024, "#7750b1"),
+    (2023, 2023, "#5950b1"),
+    (2022, 2022, "#5064b1"),
+    (2020, 2021, "#5089b1"),
     (2016, 2019, "#50aeb1"),
     (2011, 2015, "#50b177"),
     (2006, 2010, "#8bb150"),
@@ -292,7 +292,7 @@ def draw_graph_matplotlib(G: nx.Graph, ax: plt.Axes | None = None) -> None:
         node_size=label_sizes, node_color=label_fill_colors,
         edgecolors=label_edge_colors, linewidths=label_linewidth, ax=ax,
     )
-    nx.draw_networkx_edges(G, pos, alpha=0.3, ax=ax)
+    nx.draw_networkx_edges(G, pos, alpha=0.21, edge_color="#A4AFB0", ax=ax)
 
     # Compact year-color legend in the bottom-left corner.
     _legend_entries = []

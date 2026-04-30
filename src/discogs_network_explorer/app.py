@@ -304,6 +304,7 @@ activity_window_start: int = 2016
 activity_window_end: int   = CURRENT_YEAR
 activity_min_releases: int = 1
 activity_min_first_release: int = 0
+activity_max_last_release: int = CURRENT_YEAR
 
 if activity_window_on:
     activity_window_start, activity_window_end = st.sidebar.slider(
@@ -334,6 +335,17 @@ if activity_window_on:
         step=1,
         help="Remove any discovered label whose earliest known release "
              "predates this year. Useful for filtering out older labels.",
+    )
+
+    activity_max_last_release = st.sidebar.slider(
+        "Exclude labels with last release after",
+        min_value=1900,
+        max_value=CURRENT_YEAR,
+        value=CURRENT_YEAR,
+        step=1,
+        help="Remove any discovered label whose most recent known release "
+             "is after this year. Useful for focusing on labels that became "
+             "inactive by a certain date.",
     )
 
 
@@ -681,6 +693,17 @@ if activity_window_on and not df.empty:
         if old_labels:
             df = df[~df["label_id"].astype(str).isin(old_labels)].copy()
 
+    if activity_max_last_release < CURRENT_YEAR:
+        too_new_labels: set[str] = set()
+        for lid in set(df["label_id"].astype(str).unique()):
+            if lid in seed_ids_set:
+                continue
+            latest = _all_label_years.get(lid, {}).get("latest")
+            if latest is not None and latest > activity_max_last_release:
+                too_new_labels.add(lid)
+        if too_new_labels:
+            df = df[~df["label_id"].astype(str).isin(too_new_labels)].copy()
+
     # Apply the same window to artists when seeds include explicit artist IDs.
     if _seed_mode_used in {"Artists Only", "Labels + Artists"}:
         df = filter_artists_by_activity_window(
@@ -695,6 +718,10 @@ _label_years: dict[str, dict[str, int | None]] = {
     _lid: _all_label_years.get(_lid, {"earliest": None, "latest": None})
     for _lid in df["label_id"].astype(str).unique()
 }
+# Seed labels always retain year data even when filtered out of df.
+for _sid in [str(s) for s in (_seed_labels_used or [])]:
+    if _sid not in _label_years:
+        _label_years[_sid] = _all_label_years.get(_sid, {"earliest": None, "latest": None})
 
 if df.empty:
     st.warning(
@@ -1351,6 +1378,10 @@ def _extract_yt_video_id(url: str) -> str | None:
 
 
 _btn_labels = {"YouTube": "Build YouTube Playlist", "Apple Music": "Build Apple Music Playlist", "Apple+YT": "Build Apple+YT Playlists"}
+_dnx_build_vq: list[dict] | None = None
+_dnx_build_un: list[dict] | None = None
+_dnx_build_ar: list[dict] | None = None
+
 if st.button(_btn_labels[dnx_platform], type="primary"):
     entries = [e.strip() for e in dnx_raw.split(",") if e.strip()]
     if not entries:
@@ -1835,51 +1866,21 @@ if st.button(_btn_labels[dnx_platform], type="primary"):
     # Add auto-accepted search results to main queue.
     video_queue.extend(accepted_from_search)
 
-    # ── Borderline review ─────────────────────────────────────────────────
-
+    # ── Borderline gate ──────────────────────────────────────────────────
+    # When borderline matches exist, store pipeline state in session_state
+    # so the user can review and check boxes at their own pace across
+    # Streamlit reruns.  The playlist builds only after explicit confirm.
     if borderline_from_search:
-        st.subheader("Review borderline matches")
-        st.caption(
-            "These tracks matched with moderate confidence. Check the box "
-            "to include them in the playlist."
-        )
-        review_df = pd.DataFrame([
-            {
-                "Include":        False,
-                "Discogs Artist": b["artist"],
-                "Discogs Track":  b.get("release", ""),
-                "Match Artist":   b["matched_artist"],
-                "Match Track":    b["matched_title"],
-                "Artist Score":   b["artist_score"],
-                "Track Score":    b["title_score"],
-            }
-            for b in borderline_from_search
-        ])
-        edited_df = st.data_editor(
-            review_df,
-            use_container_width=True,
-            hide_index=True,
-            key="dnx_borderline_review",
-            column_config={
-                "Include":      st.column_config.CheckboxColumn("Include", default=False),
-                "Artist Score": st.column_config.NumberColumn(format="%.2f"),
-                "Track Score":  st.column_config.NumberColumn(format="%.2f"),
-            },
-        )
-        for idx, row in edited_df.iterrows():
-            if row["Include"]:
-                video_queue.append(borderline_from_search[idx])
-            else:
-                b = borderline_from_search[idx]
-                unobtained.append({
-                    "artist": b["artist"],
-                    "track": b.get("discogs_track", b.get("matched_title", "")),
-                    "release": b["release"],
-                    "label": b["label"],
-                    "reason": "declined",
-                    "discogs_url": f"https://www.discogs.com/release/{b.get('rid', '')}",
-                })
+        st.session_state["dnx_pending"] = {
+            "video_queue": video_queue,
+            "borderline": borderline_from_search,
+            "rejected": rejected_from_search,
+            "unobtained": unobtained,
+            "all_releases": all_releases,
+        }
+        st.rerun()
 
+    # No borderline — show rejected and proceed to build
     if rejected_from_search:
         with st.expander(f"Rejected matches ({len(rejected_from_search)})"):
             rej_df = pd.DataFrame([
@@ -1904,282 +1905,366 @@ if st.button(_btn_labels[dnx_platform], type="primary"):
                 "discogs_url": f"https://www.discogs.com/release/{r.get('rid', '')}",
             })
 
+    _dnx_build_vq = video_queue
+    _dnx_build_un = unobtained
+    _dnx_build_ar = all_releases
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DNX — BORDERLINE REVIEW (persists across Streamlit reruns)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if "dnx_pending" in st.session_state:
+    _pending = st.session_state["dnx_pending"]
+
+    st.subheader("Review borderline matches")
+    st.caption(
+        "These tracks matched with moderate confidence. Check the boxes "
+        "to include them in the playlist, then click **Confirm** below."
+    )
+    _review_df = pd.DataFrame([
+        {
+            "Include":        False,
+            "Discogs Artist": b["artist"],
+            "Discogs Track":  b.get("release", ""),
+            "Match Artist":   b["matched_artist"],
+            "Match Track":    b["matched_title"],
+            "Artist Score":   b["artist_score"],
+            "Track Score":    b["title_score"],
+        }
+        for b in _pending["borderline"]
+    ])
+    _edited_df = st.data_editor(
+        _review_df,
+        use_container_width=True,
+        hide_index=True,
+        key="dnx_borderline_review",
+        column_config={
+            "Include":      st.column_config.CheckboxColumn("Include", default=False),
+            "Artist Score": st.column_config.NumberColumn(format="%.2f"),
+            "Track Score":  st.column_config.NumberColumn(format="%.2f"),
+        },
+    )
+
+    if _pending["rejected"]:
+        with st.expander(f"Rejected matches ({len(_pending['rejected'])})"):
+            _rej_df = pd.DataFrame([
+                {
+                    "Discogs Artist": r["artist"],
+                    "Discogs Track":  r.get("release", ""),
+                    "Match Artist":   r["matched_artist"],
+                    "Match Track":    r["matched_title"],
+                    "Artist Score":   r["artist_score"],
+                    "Track Score":    r["title_score"],
+                }
+                for r in _pending["rejected"]
+            ])
+            st.dataframe(_rej_df, use_container_width=True, hide_index=True)
+
+    if st.button("Confirm selections and build playlist", type="primary"):
+        _vq = list(_pending["video_queue"])
+        _un = list(_pending["unobtained"])
+
+        for _bidx, _brow in _edited_df.iterrows():
+            if _brow["Include"]:
+                _vq.append(_pending["borderline"][_bidx])
+            else:
+                _bd = _pending["borderline"][_bidx]
+                _un.append({
+                    "artist": _bd["artist"],
+                    "track": _bd.get("discogs_track", _bd.get("matched_title", "")),
+                    "release": _bd["release"],
+                    "label": _bd["label"],
+                    "reason": "declined",
+                    "discogs_url": f"https://www.discogs.com/release/{_bd.get('rid', '')}",
+                })
+
+        for _rd in _pending["rejected"]:
+            _un.append({
+                "artist": _rd["artist"],
+                "track": _rd.get("discogs_track", _rd.get("matched_title", "")),
+                "release": _rd["release"],
+                "label": _rd["label"],
+                "reason": "rejected",
+                "discogs_url": f"https://www.discogs.com/release/{_rd.get('rid', '')}",
+            })
+
+        del st.session_state["dnx_pending"]
+        _dnx_build_vq = _vq
+        _dnx_build_un = _un
+        _dnx_build_ar = _pending["all_releases"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DNX — PLAYLIST BUILD (runs from either path above)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if _dnx_build_vq is not None:
+    video_queue = _dnx_build_vq
+    unobtained = _dnx_build_un
+    all_releases = _dnx_build_ar
+
     if not video_queue:
-        if not dnx_search_fallback and search_queue:
-            _platform_label = {"YouTube": "YouTube", "Apple Music": "Apple Music", "Apple+YT": "YouTube"}[dnx_platform]
-            st.warning(
-                f"No tracks found. "
-                f"Enable **search fallback** above to search {_platform_label} "
-                f"for the {len(search_queue)} track(s) by artist + title."
-            )
-        else:
-            st.warning("No tracks found to add.")
-        st.stop()
+        st.warning("No tracks to add to the playlist.")
+    else:
+        video_queue.sort(key=lambda v: v["seq"])
 
-    # ── Sort by seq and deduplicate ───────────────────────────────────────
+        seen_ids: set[str] = set()
+        unique_queue: list[dict] = []
+        for v in video_queue:
+            if v["video_id"] not in seen_ids:
+                seen_ids.add(v["video_id"])
+                unique_queue.append(v)
+        video_queue = unique_queue
 
-    video_queue.sort(key=lambda v: v["seq"])
+        _desc_lines = [
+            f"Generated with love and the power of *magic gatorade* by dnx, "
+            f"{len(video_queue)} tracks from {len(all_releases)} releases.",
+        ]
 
-    seen_ids: set[str] = set()
-    unique_queue: list[dict] = []
-    for v in video_queue:
-        if v["video_id"] not in seen_ids:
-            seen_ids.add(v["video_id"])
-            unique_queue.append(v)
-    video_queue = unique_queue
-
-    # ── Build playlist ──────────────────────────────────────────────────────
-
-    _desc_lines = [
-        f"Generated with love and the power of *magic gatorade* by dnx, "
-        f"{len(video_queue)} tracks from {len(all_releases)} releases.",
-    ]
-
-    if unobtained:
-        _desc_lines.append("")
-        _desc_lines.append(f"Unobtained tracks ({len(unobtained)}):")
-        _desc_lines.append("")
-
-        _by_url: dict[str, list[str]] = {}
-        _url_to_release: dict[str, str] = {}
-        for u in unobtained:
-            url = u.get("discogs_url", "") or "unknown"
-            if url not in _by_url:
-                _by_url[url] = []
-                _url_to_release[url] = u.get("release", "")
-            _by_url[url].append(f"  {u['artist']} – {u['track']}")
-
-        for url, tracks in _by_url.items():
-            release = _url_to_release[url]
-            _desc_lines.append(release)
-            if url != "unknown":
-                _desc_lines.append(url)
-            _desc_lines.extend(tracks)
+        if unobtained:
+            _desc_lines.append("")
+            _desc_lines.append(f"Unobtained tracks ({len(unobtained)}):")
             _desc_lines.append("")
 
-    _playlist_description = "\n".join(_desc_lines)
-    if len(_playlist_description) > 4500:
-        _playlist_description = (
-            _playlist_description[:4450]
-            + "\n\n... (truncated — see dnx_unobtained.csv for full list)"
-        )
+            _by_url: dict[str, list[str]] = {}
+            _url_to_release: dict[str, str] = {}
+            for u in unobtained:
+                url = u.get("discogs_url", "") or "unknown"
+                if url not in _by_url:
+                    _by_url[url] = []
+                    _url_to_release[url] = u.get("release", "")
+                _by_url[url].append(f"  {u['artist']} – {u['track']}")
 
-    if dnx_platform == "YouTube":
-        yt_service = get_youtube_service(_yt_creds)
+            for url, tracks in _by_url.items():
+                release = _url_to_release[url]
+                _desc_lines.append(release)
+                if url != "unknown":
+                    _desc_lines.append(url)
+                _desc_lines.extend(tracks)
+                _desc_lines.append("")
 
-        playlist_id = create_playlist(
-            yt_service,
-            title=dnx_playlist_name,
-            description=_playlist_description,
-        )
-        playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
-        st.info(f"Created playlist: [{dnx_playlist_name}]({playlist_url})")
-
-        added = 0
-        failed = 0
-        progress = st.progress(0, text="Adding videos to playlist…")
-        results_log: list[dict] = []
-
-        for idx, v in enumerate(video_queue):
-            try:
-                add_video_to_playlist(yt_service, playlist_id, v["video_id"])
-                added += 1
-                v["status"] = "added"
-            except Exception:
-                failed += 1
-                v["status"] = "failed"
-            results_log.append(v)
-
-            progress.progress(
-                (idx + 1) / len(video_queue),
-                text=f"Adding to playlist… {idx + 1}/{len(video_queue)} ({added} added)",
+        _playlist_description = "\n".join(_desc_lines)
+        if len(_playlist_description) > 4500:
+            _playlist_description = (
+                _playlist_description[:4450]
+                + "\n\n... (truncated — see dnx_unobtained.csv for full list)"
             )
 
-        progress.empty()
+        if dnx_platform == "YouTube":
+            yt_service = get_youtube_service(_yt_creds)
 
-        discogs_count = sum(1 for r in results_log if r["source"] == "discogs" and r["status"] == "added")
-        search_count = sum(1 for r in results_log if r.get("source") in ("yt_search",) and r["status"] == "added")
-
-        st.success(
-            f"Done — **{added}** videos added "
-            f"({discogs_count} from Discogs, {search_count} from YouTube search), "
-            f"**{failed}** failed. "
-            f"[Open playlist]({playlist_url})"
-        )
-
-    elif dnx_platform == "Apple+YT":
-        _am_dev_token = _am_config["developer_token"]
-        yt_service = get_youtube_service(_yt_creds)
-
-        am_items = [v for v in video_queue if v.get("source") == "am_search"]
-        yt_items = [v for v in video_queue if v.get("source") in ("discogs", "yt_search")]
-
-        results_log: list[dict] = []
-        added = 0
-        failed = 0
-        yt_playlist_url = ""
-
-        if yt_items:
-            yt_playlist_id = create_playlist(
+            playlist_id = create_playlist(
                 yt_service,
-                title=f"{dnx_playlist_name} (YT)",
+                title=dnx_playlist_name,
                 description=_playlist_description,
             )
-            yt_playlist_url = f"https://www.youtube.com/playlist?list={yt_playlist_id}"
-            st.info(f"Created YouTube playlist: [{dnx_playlist_name} (YT)]({yt_playlist_url})")
+            playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
+            st.info(f"Created playlist: [{dnx_playlist_name}]({playlist_url})")
 
-            yt_added = 0
-            yt_failed = 0
-            progress = st.progress(0, text="Adding videos to YouTube playlist…")
-            for idx, v in enumerate(yt_items):
+            added = 0
+            failed = 0
+            progress = st.progress(0, text="Adding videos to playlist…")
+            results_log: list[dict] = []
+
+            for idx, v in enumerate(video_queue):
                 try:
-                    add_video_to_playlist(yt_service, yt_playlist_id, v["video_id"])
-                    yt_added += 1
+                    add_video_to_playlist(yt_service, playlist_id, v["video_id"])
+                    added += 1
                     v["status"] = "added"
                 except Exception:
-                    yt_failed += 1
+                    failed += 1
                     v["status"] = "failed"
                 results_log.append(v)
+
                 progress.progress(
-                    (idx + 1) / len(yt_items),
-                    text=f"YouTube… {idx + 1}/{len(yt_items)} ({yt_added} added)",
+                    (idx + 1) / len(video_queue),
+                    text=f"Adding to playlist… {idx + 1}/{len(video_queue)} ({added} added)",
                 )
+
             progress.empty()
-            added += yt_added
-            failed += yt_failed
 
-        am_description = _playlist_description
-        if yt_playlist_url:
-            am_description += f"\n\nYouTube companion playlist:\n{yt_playlist_url}"
-        if len(am_description) > 4500:
-            am_description = am_description[:4450] + "\n\n... (truncated)"
+            discogs_count = sum(1 for r in results_log if r["source"] == "discogs" and r["status"] == "added")
+            search_count = sum(1 for r in results_log if r.get("source") in ("yt_search",) and r["status"] == "added")
 
-        if am_items:
-            am_playlist_id = am_create_playlist(
+            st.success(
+                f"Done — **{added}** videos added "
+                f"({discogs_count} from Discogs, {search_count} from YouTube search), "
+                f"**{failed}** failed. "
+                f"[Open playlist]({playlist_url})"
+            )
+
+        elif dnx_platform == "Apple+YT":
+            _am_dev_token = _am_config["developer_token"]
+            yt_service = get_youtube_service(_yt_creds)
+
+            am_items = [v for v in video_queue if v.get("source") == "am_search"]
+            yt_items = [v for v in video_queue if v.get("source") in ("discogs", "yt_search")]
+
+            results_log: list[dict] = []
+            added = 0
+            failed = 0
+            yt_playlist_url = ""
+
+            if yt_items:
+                yt_playlist_id = create_playlist(
+                    yt_service,
+                    title=f"{dnx_playlist_name} (YT)",
+                    description=_playlist_description,
+                )
+                yt_playlist_url = f"https://www.youtube.com/playlist?list={yt_playlist_id}"
+                st.info(f"Created YouTube playlist: [{dnx_playlist_name} (YT)]({yt_playlist_url})")
+
+                yt_added = 0
+                yt_failed = 0
+                progress = st.progress(0, text="Adding videos to YouTube playlist…")
+                for idx, v in enumerate(yt_items):
+                    try:
+                        add_video_to_playlist(yt_service, yt_playlist_id, v["video_id"])
+                        yt_added += 1
+                        v["status"] = "added"
+                    except Exception:
+                        yt_failed += 1
+                        v["status"] = "failed"
+                    results_log.append(v)
+                    progress.progress(
+                        (idx + 1) / len(yt_items),
+                        text=f"YouTube… {idx + 1}/{len(yt_items)} ({yt_added} added)",
+                    )
+                progress.empty()
+                added += yt_added
+                failed += yt_failed
+
+            am_description = _playlist_description
+            if yt_playlist_url:
+                am_description += f"\n\nYouTube companion playlist:\n{yt_playlist_url}"
+            if len(am_description) > 4500:
+                am_description = am_description[:4450] + "\n\n... (truncated)"
+
+            if am_items:
+                am_playlist_id = am_create_playlist(
+                    _am_dev_token,
+                    _am_user_token,
+                    title=dnx_playlist_name,
+                    description=am_description,
+                )
+                st.info(f"Created Apple Music playlist: **{dnx_playlist_name}**")
+
+                am_added = 0
+                am_failed = 0
+                chunk_size = 25
+                progress = st.progress(0, text="Adding songs to Apple Music playlist…")
+                for chunk_start in range(0, len(am_items), chunk_size):
+                    chunk = am_items[chunk_start:chunk_start + chunk_size]
+                    song_ids = [v["video_id"] for v in chunk]
+                    try:
+                        am_add_songs_to_playlist(
+                            _am_dev_token, _am_user_token, am_playlist_id, song_ids,
+                        )
+                        for v in chunk:
+                            v["status"] = "added"
+                            am_added += 1
+                    except Exception:
+                        for v in chunk:
+                            v["status"] = "failed"
+                            am_failed += 1
+                    results_log.extend(chunk)
+                    progress.progress(
+                        min(chunk_start + chunk_size, len(am_items)) / len(am_items),
+                        text=f"Apple Music… {min(chunk_start + chunk_size, len(am_items))}/{len(am_items)} ({am_added} added)",
+                    )
+                progress.empty()
+                added += am_added
+                failed += am_failed
+
+            _yt_added_n = sum(1 for r in results_log if r.get("source") in ("discogs", "yt_search") and r["status"] == "added")
+            _am_added_n = sum(1 for r in results_log if r.get("source") == "am_search" and r["status"] == "added")
+            _summary = f"Done — **{added}** tracks added ({_am_added_n} Apple Music, {_yt_added_n} YouTube), **{failed}** failed."
+            if yt_playlist_url:
+                _summary += f" [Open YouTube playlist]({yt_playlist_url})"
+            st.success(_summary)
+
+        else:
+            _am_dev_token = _am_config["developer_token"]
+
+            playlist_id = am_create_playlist(
                 _am_dev_token,
                 _am_user_token,
                 title=dnx_playlist_name,
-                description=am_description,
+                description=_playlist_description,
             )
             st.info(f"Created Apple Music playlist: **{dnx_playlist_name}**")
 
-            am_added = 0
-            am_failed = 0
+            added = 0
+            failed = 0
+            results_log = []
             chunk_size = 25
-            progress = st.progress(0, text="Adding songs to Apple Music playlist…")
-            for chunk_start in range(0, len(am_items), chunk_size):
-                chunk = am_items[chunk_start:chunk_start + chunk_size]
+            progress = st.progress(0, text="Adding songs to playlist…")
+
+            for chunk_start in range(0, len(video_queue), chunk_size):
+                chunk = video_queue[chunk_start:chunk_start + chunk_size]
                 song_ids = [v["video_id"] for v in chunk]
                 try:
                     am_add_songs_to_playlist(
-                        _am_dev_token, _am_user_token, am_playlist_id, song_ids,
+                        _am_dev_token, _am_user_token, playlist_id, song_ids,
                     )
                     for v in chunk:
                         v["status"] = "added"
-                        am_added += 1
+                        added += 1
                 except Exception:
                     for v in chunk:
                         v["status"] = "failed"
-                        am_failed += 1
+                        failed += 1
                 results_log.extend(chunk)
+
                 progress.progress(
-                    min(chunk_start + chunk_size, len(am_items)) / len(am_items),
-                    text=f"Apple Music… {min(chunk_start + chunk_size, len(am_items))}/{len(am_items)} ({am_added} added)",
+                    min((chunk_start + chunk_size), len(video_queue)) / len(video_queue),
+                    text=f"Adding to playlist… {min(chunk_start + chunk_size, len(video_queue))}/{len(video_queue)} ({added} added)",
                 )
+
             progress.empty()
-            added += am_added
-            failed += am_failed
 
-        _yt_added_n = sum(1 for r in results_log if r.get("source") in ("discogs", "yt_search") and r["status"] == "added")
-        _am_added_n = sum(1 for r in results_log if r.get("source") == "am_search" and r["status"] == "added")
-        _summary = f"Done — **{added}** tracks added ({_am_added_n} Apple Music, {_yt_added_n} YouTube), **{failed}** failed."
-        if yt_playlist_url:
-            _summary += f" [Open YouTube playlist]({yt_playlist_url})"
-        st.success(_summary)
+            search_count = sum(1 for r in results_log if r.get("source") == "am_search" and r["status"] == "added")
 
-    else:
-        _am_dev_token = _am_config["developer_token"]
-
-        playlist_id = am_create_playlist(
-            _am_dev_token,
-            _am_user_token,
-            title=dnx_playlist_name,
-            description=_playlist_description,
-        )
-        st.info(f"Created Apple Music playlist: **{dnx_playlist_name}**")
-
-        added = 0
-        failed = 0
-        results_log = []
-        chunk_size = 25
-        progress = st.progress(0, text="Adding songs to playlist…")
-
-        for chunk_start in range(0, len(video_queue), chunk_size):
-            chunk = video_queue[chunk_start:chunk_start + chunk_size]
-            song_ids = [v["video_id"] for v in chunk]
-            try:
-                am_add_songs_to_playlist(
-                    _am_dev_token, _am_user_token, playlist_id, song_ids,
-                )
-                for v in chunk:
-                    v["status"] = "added"
-                    added += 1
-            except Exception:
-                for v in chunk:
-                    v["status"] = "failed"
-                    failed += 1
-            results_log.extend(chunk)
-
-            progress.progress(
-                min((chunk_start + chunk_size), len(video_queue)) / len(video_queue),
-                text=f"Adding to playlist… {min(chunk_start + chunk_size, len(video_queue))}/{len(video_queue)} ({added} added)",
+            st.success(
+                f"Done — **{added}** songs added "
+                f"({search_count} from Apple Music search), "
+                f"**{failed}** failed."
             )
 
-        progress.empty()
+        with st.expander("Extraction log"):
+            log_df = pd.DataFrame(results_log)
+            display_cols = [c for c in ["artist", "release", "title", "source", "status", "video_id", "label"] if c in log_df.columns]
+            st.dataframe(log_df[display_cols], use_container_width=True)
 
-        search_count = sum(1 for r in results_log if r.get("source") == "am_search" and r["status"] == "added")
+        for v in results_log:
+            if v.get("status") == "failed":
+                unobtained.append({
+                    "artist": v.get("artist", ""),
+                    "track": v.get("discogs_track", v.get("title", "")),
+                    "release": v.get("release", ""),
+                    "label": v.get("label", ""),
+                    "reason": "insert_failed",
+                    "discogs_url": f"https://www.discogs.com/release/{v['rid']}" if v.get("rid") else "",
+                })
 
-        st.success(
-            f"Done — **{added}** songs added "
-            f"({search_count} from Apple Music search), "
-            f"**{failed}** failed."
-        )
+        total_tracks = sum(len(rel.get("tracklist") or []) for rel in all_releases)
 
-    with st.expander("Extraction log"):
-        log_df = pd.DataFrame(results_log)
-        display_cols = [c for c in ["artist", "release", "title", "source", "status", "video_id", "label"] if c in log_df.columns]
-        st.dataframe(log_df[display_cols], use_container_width=True)
-
-    # ── Unobtained tracks report ─────────────────────────────────────────
-    # Add tracks that failed playlist insertion.
-    for v in results_log:
-        if v.get("status") == "failed":
-            unobtained.append({
-                "artist": v.get("artist", ""),
-                "track": v.get("discogs_track", v.get("title", "")),
-                "release": v.get("release", ""),
-                "label": v.get("label", ""),
-                "reason": "insert_failed",
-                "discogs_url": f"https://www.discogs.com/release/{v['rid']}" if v.get("rid") else "",
-            })
-
-    total_tracks = sum(len(rel.get("tracklist") or []) for rel in all_releases)
-
-    if unobtained:
-        st.subheader(f"Unobtained tracks ({len(unobtained)} of ~{total_tracks} total)")
-        st.caption(
-            "Tracks from fetched releases that were not added to the playlist. "
-            "Use the Discogs links to find and listen to these tracks manually."
-        )
-        unobtained_df = pd.DataFrame(unobtained)
-        display_order = [c for c in ["artist", "track", "release", "label", "reason", "discogs_url"] if c in unobtained_df.columns]
-        st.dataframe(unobtained_df[display_order], use_container_width=True, hide_index=True)
-        _unobtained_csv = unobtained_df[display_order].to_csv(index=False)
-        st.download_button(
-            "Download unobtained tracks (CSV)",
-            data=_unobtained_csv,
-            file_name="dnx_unobtained.csv",
-            mime="text/csv",
-        )
-    else:
-        st.success(f"All ~{total_tracks} tracks obtained.")
+        if unobtained:
+            st.subheader(f"Unobtained tracks ({len(unobtained)} of ~{total_tracks} total)")
+            st.caption(
+                "Tracks from fetched releases that were not added to the playlist. "
+                "Use the Discogs links to find and listen to these tracks manually."
+            )
+            unobtained_df = pd.DataFrame(unobtained)
+            display_order = [c for c in ["artist", "track", "release", "label", "reason", "discogs_url"] if c in unobtained_df.columns]
+            st.dataframe(unobtained_df[display_order], use_container_width=True, hide_index=True)
+            _unobtained_csv = unobtained_df[display_order].to_csv(index=False)
+            st.download_button(
+                "Download unobtained tracks (CSV)",
+                data=_unobtained_csv,
+                file_name="dnx_unobtained.csv",
+                mime="text/csv",
+            )
+        else:
+            st.success(f"All ~{total_tracks} tracks obtained.")

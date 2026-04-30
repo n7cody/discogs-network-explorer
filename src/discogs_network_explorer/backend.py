@@ -71,8 +71,8 @@ _session.cookies = _NoCookieJar()  # type: ignore[assignment]
 API_BASE: str = "https://api.discogs.com"
 
 # Discogs rate limit: 60 authenticated requests/minute.
-# A 1.1-second delay keeps throughput at ~54 req/min with headroom.
-REQ_DELAY_SECONDS: float = 1.1
+# A 1.02-second delay keeps throughput at ~58.8 req/min with slim headroom.
+REQ_DELAY_SECONDS: float = 1.02
 
 # Discogs hard cap on items per page.
 PAGE_SIZE: int = 100

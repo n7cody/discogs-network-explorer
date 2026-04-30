@@ -723,6 +723,15 @@ for _sid in [str(s) for s in (_seed_labels_used or [])]:
     if _sid not in _label_years:
         _label_years[_sid] = _all_label_years.get(_sid, {"earliest": None, "latest": None})
 
+# Collect total release counts for labels surviving filters (used for graph halo sizing).
+_label_release_counts: dict[str, int] = {
+    _lid: get_label_release_count(_lid)
+    for _lid in df["label_id"].astype(str).unique()
+}
+for _sid in [str(s) for s in (_seed_labels_used or [])]:
+    if _sid not in _label_release_counts:
+        _label_release_counts[_sid] = get_label_release_count(_sid)
+
 if df.empty:
     st.warning(
         "All rows were filtered out by the current settings. "
@@ -820,19 +829,20 @@ def _build_csv_outputs(
         if lid in set(seed_label_ids_used) and aid in artists:
             seed_aid_sets.setdefault(lid, set()).add(aid)
 
-    seed_count = len(artists) if artists else 1
     label_summary_rows: list[dict] = []
     for lid, aid_map in sorted(l2a_names.items(), key=lambda x: len(x[1]), reverse=True):
-        overlap_pct = round(len(aid_map) / seed_count * 100, 2)
         artist_list = ", ".join(sorted(set(aid_map.values())))
+        n_artists = len(aid_map)
+        releases = get_label_release_count(lid)
+        overlap_ratio = round(releases / n_artists, 2) if n_artists > 0 else 0.0
         yrs = (label_years or {}).get(lid, {})
         row_dict: dict = {
             "label_name":    label_id_to_name.get(lid, lid),
             "label_id":      lid,
-            "releases":      get_label_release_count(lid),
-            "artist_n":      len(aid_map),
+            "releases":      releases,
+            "artist_n":      n_artists,
             "artists":       artist_list,
-            "overlap_pct":   overlap_pct,
+            "overlap_ratio": overlap_ratio,
             "earliest_year": yrs.get("earliest", ""),
             "latest_year":   yrs.get("latest", ""),
         }
@@ -997,6 +1007,7 @@ with tab_graph:
             seed_label_ids=_seed_ids,
             seed_artist_union=_artists,  # authoritative pool from Phase 1 crawl
             label_years=_label_years,
+            label_release_counts=_label_release_counts,
         )
     else:
         G = build_artist_label_graph(
@@ -1030,7 +1041,8 @@ with tab_graph:
 
     st.caption(
         f"Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges.  \n"
-        f"Node fill color = latest release year · Border color = earliest release year"
+        f"Node size = artist count from seed labels · Fill = latest year · Border = earliest year · "
+        f"Halo = overlap ratio (releases / artists)"
     )
 
 
@@ -1066,6 +1078,7 @@ with tab_report:
                 seed_label_ids=_rep_seed_ids,
                 seed_artist_union=_artists,
                 label_years=_label_years,
+                label_release_counts=_label_release_counts,
             )
         else:
             _G = build_artist_label_graph(

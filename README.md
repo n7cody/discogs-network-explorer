@@ -175,6 +175,10 @@ dnx uses Apple's MusicKit API. You need a paid [Apple Developer Program](https:/
 
 Enable **Cache HTTP responses** in the sidebar to store API responses in `discogs_cache.sqlite`. Subsequent runs reuse cached data, making re-analysis near-instant. Clear the cache from the sidebar when you want fresh data.
 
+## Privacy Policy
+
+See [PRIVACY_POLICY.md](PRIVACY_POLICY.md) for details on how dne/dnx handles data and API credentials.
+
 ## Development
 
 ```bash

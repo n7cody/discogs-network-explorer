@@ -1944,6 +1944,7 @@ if "dnx_pending" in st.session_state:
             "Match Track":    b["matched_title"],
             "Artist Score":   b["artist_score"],
             "Track Score":    b["title_score"],
+            "Release":        f"https://www.discogs.com/release/{b.get('rid', '')}" if b.get("rid") else "",
         }
         for b in _pending["borderline"]
     ])
@@ -1956,6 +1957,7 @@ if "dnx_pending" in st.session_state:
             "Include":      st.column_config.CheckboxColumn("Include", default=False),
             "Artist Score": st.column_config.NumberColumn(format="%.2f"),
             "Track Score":  st.column_config.NumberColumn(format="%.2f"),
+            "Release":      st.column_config.LinkColumn("Release", display_text="view"),
         },
     )
 
@@ -1969,10 +1971,18 @@ if "dnx_pending" in st.session_state:
                     "Match Track":    r["matched_title"],
                     "Artist Score":   r["artist_score"],
                     "Track Score":    r["title_score"],
+                    "Release":        f"https://www.discogs.com/release/{r.get('rid', '')}" if r.get("rid") else "",
                 }
                 for r in _pending["rejected"]
             ])
-            st.dataframe(_rej_df, use_container_width=True, hide_index=True)
+            st.dataframe(
+                _rej_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Release": st.column_config.LinkColumn("Release", display_text="view"),
+                },
+            )
 
     if st.button("Confirm selections and build playlist", type="primary"):
         _vq = list(_pending["video_queue"])

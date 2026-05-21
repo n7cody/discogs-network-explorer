@@ -1,7 +1,7 @@
 # Privacy Policy
 
 **Discogs Network Explorer (dne/dnx)**
-Last updated: 2026-04-30
+Last updated: 2026-05-21
 
 ## Overview
 
@@ -16,25 +16,31 @@ dne reads publicly available music metadata (artist names, label names, release 
 
 ### YouTube Data API v3
 dnx uses the YouTube Data API v3 to:
-- **Create playlists** in the authenticated user's own YouTube account
-- **Add videos** to those playlists
-- **Search** for videos by artist and track name (when search fallback is enabled)
+- **Search for videos** by artist and track name when search fallback is enabled (receives video IDs, video titles, and channel names from search results)
+- **Create playlists** in the authenticated user's YouTube account (receives the created playlist ID)
+- **Add videos** to those playlists (sends video IDs to the YouTube API)
 
-dnx does **not** upload, modify, or delete any existing YouTube content. It does not access watch history, subscriptions, comments, or any other YouTube account data beyond playlist creation.
+YouTube API Data received by dnx (video IDs, video titles, channel names, playlist IDs) is used only within the current application session to build playlists. This data is not persisted to disk, transmitted to any external server, or shared with any third party. Once the application session ends, all in-memory API Data is discarded.
+
+The only YouTube-related information persisted to disk is the OAuth 2.0 token described in the "Information stored on your device" section below.
+
+dnx does **not** access, collect, or store YouTube watch history, subscriptions, likes, comments, uploaded videos, or any other YouTube account data beyond what is described above. dnx does not upload, modify, or delete any existing YouTube content.
 
 ### Apple Music (MusicKit API)
 dnx optionally uses Apple's MusicKit API to search the Apple Music catalog and create playlists in the authenticated user's Apple Music library. No Apple Music listening history or account data is accessed.
 
-## Data storage
+## Information stored on your device
 
-All data is stored locally on the user's machine:
+dne/dnx stores the following information locally on the user's machine. No data is transmitted to any server operated by the developer or any third party, other than the official API endpoints listed above (api.discogs.com, www.googleapis.com, api.music.apple.com).
 
-- **OAuth tokens** (YouTube): Saved to `~/.dne/youtube_token.json` on the user's local filesystem. Used to maintain the YouTube API session without requiring re-authorization on each use.
-- **Apple Music credentials**: Saved to `~/.dne/apple_music_config.json` and `~/.dne/apple_music_user_token.txt` on the user's local filesystem.
-- **HTTP cache**: Optionally stored in a local SQLite file (`discogs_cache.sqlite`) to avoid redundant API calls. Contains only publicly available Discogs metadata.
-- **Discogs token**: Optionally stored in a local `.env` file.
+- **YouTube OAuth 2.0 token** (`~/.dne/youtube_token.json`): Contains an access token and refresh token issued by Google during OAuth authorization. This file allows the application to maintain an authenticated session without requiring re-authorization on each use. It does not contain your Google account password.
+- **Apple Music credentials** (`~/.dne/apple_music_config.json`, `~/.dne/apple_music_user_token.txt`): Contains developer and user tokens for Apple Music API access.
+- **HTTP response cache** (`discogs_cache.sqlite`): A local SQLite database that caches API responses from Discogs to reduce redundant network requests. Contains publicly available music metadata only. Does not cache YouTube API responses or any YouTube user data.
+- **Discogs API token** (`.env` file, optional): Stores the user's Discogs personal access token if configured.
 
-No data is transmitted to any server operated by the developer or any third party, other than the official API endpoints listed above (api.discogs.com, www.googleapis.com, api.music.apple.com).
+dne/dnx does **not** use browser cookies, web beacons, tracking pixels, or similar browser-based tracking technology. No information is placed on or read from users' web browsers. All stored files reside in the local filesystem and are fully under the user's control.
+
+No third party is permitted to access, collect, or store information on or from users' devices through dne/dnx.
 
 ## Data sharing
 
@@ -53,7 +59,7 @@ dne/dnx does **not**:
 
 ## YouTube API Services
 
-dne/dnx's use of YouTube API Services is subject to [Google's Privacy Policy](https://policies.google.com/privacy) and the [YouTube Terms of Service](https://www.youtube.com/t/terms). Users authenticate directly with Google via OAuth 2.0; dne/dnx never sees or stores Google account passwords.
+dne/dnx's use of YouTube API Services is subject to the [YouTube Terms of Service](https://www.youtube.com/t/terms), [Google Privacy Policy](https://policies.google.com/privacy), and the [Google API Services User Data Policy](https://developers.google.com/terms/api-services-user-data-policy), including the Limited Use requirements. Users authenticate directly with Google via OAuth 2.0; dne/dnx never sees or stores Google account passwords.
 
 ## Contact
 

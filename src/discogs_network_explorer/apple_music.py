@@ -17,21 +17,23 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 import jwt
 import requests
 
+from .sanitize import write_private
+
 # Apple Music API base URL.
 _API_BASE = "https://api.music.apple.com/v1"
+
+# Seconds before an Apple Music API request is abandoned.
+_TIMEOUT = 30
 
 # Credential storage.
 _CONFIG_DIR = Path.home() / ".dne"
 _AM_CONFIG_PATH = _CONFIG_DIR / "apple_music_config.json"
 _AM_USER_TOKEN_PATH = _CONFIG_DIR / "apple_music_user_token.txt"
-
-
-def _ensure_config_dir() -> None:
-    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def get_stored_config_path() -> Path:
@@ -42,7 +44,7 @@ def get_stored_user_token_path() -> Path:
     return _AM_USER_TOKEN_PATH
 
 
-# ── Developer token (JWT) ──────────────────────────────────────────────────
+# Developer token (JWT)
 
 
 def generate_developer_token(
@@ -62,7 +64,7 @@ def generate_developer_token(
     Returns:
         Signed JWT string valid for 6 months (max allowed by Apple).
     """
-    private_key = Path(private_key_path).read_text()
+    private_key = Path(private_key_path).expanduser().read_text()
 
     now = int(time.time())
     payload = {
@@ -85,7 +87,6 @@ def save_config(team_id: str, key_id: str, private_key_path: str) -> str:
 
     Returns the developer token.
     """
-    _ensure_config_dir()
     dev_token = generate_developer_token(team_id, key_id, private_key_path)
     config = {
         "team_id": team_id,
@@ -93,7 +94,7 @@ def save_config(team_id: str, key_id: str, private_key_path: str) -> str:
         "private_key_path": private_key_path,
         "developer_token": dev_token,
     }
-    _AM_CONFIG_PATH.write_text(json.dumps(config, indent=2))
+    write_private(_AM_CONFIG_PATH, json.dumps(config, indent=2))
     return dev_token
 
 
@@ -119,7 +120,7 @@ def load_config() -> dict | None:
                 config["private_key_path"],
             )
             config["developer_token"] = dev_token
-            _AM_CONFIG_PATH.write_text(json.dumps(config, indent=2))
+            write_private(_AM_CONFIG_PATH, json.dumps(config, indent=2))
         return config
     except Exception:
         return None
@@ -127,8 +128,7 @@ def load_config() -> dict | None:
 
 def save_user_token(user_token: str) -> None:
     """Save the Music User Token (obtained from MusicKit JS or manual entry)."""
-    _ensure_config_dir()
-    _AM_USER_TOKEN_PATH.write_text(user_token.strip())
+    write_private(_AM_USER_TOKEN_PATH, user_token.strip())
 
 
 def load_user_token() -> str | None:
@@ -154,7 +154,7 @@ def is_connected() -> bool:
     return config is not None and user_token is not None
 
 
-# ── API helpers ─────────────────────────────────────────────────────────────
+# API helpers
 
 
 def _auth_headers(developer_token: str, user_token: str) -> dict:
@@ -189,13 +189,14 @@ def search_song(
         Dict with 'song_id', 'title', 'artist', or None if no result.
     """
     resp = requests.get(
-        f"{_API_BASE}/catalog/{storefront}/search",
+        f"{_API_BASE}/catalog/{quote(storefront, safe='')}/search",
         headers=_dev_headers(developer_token),
         params={
             "term": query,
             "types": "songs",
             "limit": 1,
         },
+        timeout=_TIMEOUT,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -233,6 +234,7 @@ def create_playlist(
                 "description": description,
             },
         },
+        timeout=_TIMEOUT,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -258,8 +260,9 @@ def add_songs_to_playlist(
     """
     tracks = [{"id": sid, "type": "songs"} for sid in song_ids]
     resp = requests.post(
-        f"{_API_BASE}/me/library/playlists/{playlist_id}/tracks",
+        f"{_API_BASE}/me/library/playlists/{quote(playlist_id, safe='')}/tracks",
         headers=_auth_headers(developer_token, user_token),
         json={"data": tracks},
+        timeout=_TIMEOUT,
     )
     resp.raise_for_status()

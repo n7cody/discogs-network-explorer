@@ -1,0 +1,79 @@
+# Apple Music setup for dnx
+
+dnx needs three things from you to build Apple Music playlists: a MusicKit key from Apple Developer, your Team ID and Key ID, and a Music User Token. you need a paid Apple Developer Program membership. you only do this once.
+
+## get a MusicKit key
+
+1. sign in at https://developer.apple.com/account
+2. open Certificates, Identifiers & Profiles, then Identifiers
+3. click + and choose Media IDs, not App IDs
+4. enter a description such as dnx and an identifier such as com.yourname.dnx
+5. check MusicKit, click Continue, then Register
+6. open Keys and click + to create a new key
+7. check MusicKit, link it to the Media ID you just made and give it a name
+8. download the .p8 key file. you can download it only once, so keep it somewhere safe
+9. note your Team ID, shown at the top right of the portal, and the Key ID, shown on the key page. both are 10 characters
+
+## get a Music User Token
+
+the Music User Token lets dnx create playlists in your Apple Music library. you get it once through a small web page in Safari.
+
+1. make a developer token in Python, using the full path to your .p8 file:
+
+   from discogs_network_explorer.apple_music import generate_developer_token
+   print(generate_developer_token("YOUR_TEAM_ID", "YOUR_KEY_ID", "/full/path/to/AuthKey_XXXXXXXXXX.p8"))
+
+2. save the HTML below as apple_music_auth.html
+3. replace YOUR_DEVELOPER_TOKEN in it with the token from step 1
+4. in the folder with the file, run python3 -m http.server 8080
+5. open http://localhost:8080/apple_music_auth.html in Safari
+6. click Authorize, sign in with your Apple ID and copy the Music User Token shown on the page
+
+--- begin HTML ---
+
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Apple Music Authorization</title>
+  <script src="https://js-cdn.music.apple.com/musickit/v3/musickit.js"></script>
+</head>
+<body>
+  <h1>Apple Music Authorization for dnx</h1>
+  <button id="auth-btn">Authorize</button>
+  <p id="token-output" style="word-break: break-all;"></p>
+  <script>
+    // paste your developer token here
+    const DEVELOPER_TOKEN = "YOUR_DEVELOPER_TOKEN";
+
+    document.addEventListener("musickitloaded", async () => {
+      const music = await MusicKit.configure({
+        developerToken: DEVELOPER_TOKEN,
+        app: { name: "dnx", build: "1.0" },
+      });
+      document.getElementById("auth-btn").addEventListener("click", async () => {
+        await music.authorize();
+        const userToken = music.musicUserToken;
+        document.getElementById("token-output").textContent =
+          "Music User Token:\n" + userToken;
+      });
+    });
+  </script>
+</body>
+</html>
+
+--- end HTML ---
+
+## connect in dnx
+
+1. in the dnx section of the app, select Apple Music
+2. enter your Team ID, Key ID, the path to the .p8 file and the Music User Token
+3. click Connect Apple Music
+
+your settings are saved in ~/.dne/apple_music_config.json and ~/.dne/apple_music_user_token.txt, readable only by you.
+
+## notes
+
+- the developer token lasts about six months, and the app renews it from your .p8 key
+- the Music User Token can expire. if playlist creation starts failing, repeat the steps above and enter the new token
+- Apple Music search has no daily limit, so search fallback is on by default
+- set the storefront to the country of your Apple Music subscription, for example us, gb or de

@@ -1,0 +1,44 @@
+release_id,reason
+1,has YouTube video
+3,track-level Remix credit
+9,Executive-Producer (must be ignored)
+12,Co-producer credit
+22,release-level Producer with bracket modifier
+367,no release year
+1983,alias group: two names of one artist
+2921,unofficial release
+4737,unofficial release with real artists
+7306,Not On Label
+7773,cached API release (parity)
+10335,cached API release (parity)
+13032,partially unofficial (not Unofficial)
+50606,master with several versions
+53050,artist in an oversized alias group
+55716,cached API release (parity)
+64933,cached API release (parity)
+67848,cached API release (parity)
+116236,master with several versions
+116925,master with several versions
+162802,alias group: two names of one artist
+205245,network: seed artist on other label
+213965,network: seed artist on other label
+500450,network: seed artist on other label
+844222,network: seed artist on other label
+944752,network: seed artist on other label
+1011705,network: seed artist on other label
+1106505,network: seed artist on other label
+1129429,seed label
+1148330,network: seed artist on other label
+1161202,network: seed artist on other label
+1345585,seed label
+1409908,seed label
+1417974,network: seed artist on other label
+1456834,network: seed artist on other label
+1490034,network: seed artist on other label
+1524016,seed label
+1559757,seed label
+1568748,seed label
+1658191,seed label
+1744568,master with several versions
+1752850,seed label
+1834508,seed label

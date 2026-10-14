@@ -34,9 +34,7 @@ from typing import Iterable
 import requests
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # COOKIE-LESS SESSION
-# ─────────────────────────────────────────────────────────────────────────────
 
 class _NoCookieJar(http.cookiejar.CookieJar):
     """
@@ -64,9 +62,7 @@ _session: requests.Session = requests.Session()
 _session.cookies = _NoCookieJar()  # type: ignore[assignment]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
 
 API_BASE: str = "https://api.discogs.com"
 
@@ -87,9 +83,7 @@ MAX_RETRIES: int = 5
 RETRY_DELAY_SECONDS: float = 2.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # INTERNAL HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _get_headers() -> dict[str, str]:
     """
@@ -114,6 +108,14 @@ def _get_headers() -> dict[str, str]:
     if token:
         headers["Authorization"] = f"Discogs token={token}"
     return headers
+
+
+def _id_path(value: object) -> str:
+    """A Discogs ID as a URL path segment; anything but a positive integer is rejected."""
+    s = str(value).strip()
+    if not (s.isascii() and s.isdigit()):
+        raise ValueError(f"invalid Discogs ID: {s[:30]!r}")
+    return s
 
 
 def _safe_get(url: str, params: dict | None = None) -> dict:
@@ -229,9 +231,7 @@ def _paged(
         page += 1
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # RELEASE DETAIL LOOKUP
-# ─────────────────────────────────────────────────────────────────────────────
 
 def get_label_name(label_id: str) -> str:
     """
@@ -244,7 +244,7 @@ def get_label_name(label_id: str) -> str:
     Returns the label ID string unchanged if the API call fails.
     """
     try:
-        data = _safe_get(f"{API_BASE}/labels/{label_id}")
+        data = _safe_get(f"{API_BASE}/labels/{_id_path(label_id)}")
         return data.get("name") or label_id
     except Exception:
         return label_id
@@ -263,7 +263,7 @@ def get_artist_name(artist_id: str) -> str:
     Returns the artist ID string unchanged if the API call fails.
     """
     try:
-        data = _safe_get(f"{API_BASE}/artists/{artist_id}")
+        data = _safe_get(f"{API_BASE}/artists/{_id_path(artist_id)}")
         return data.get("name") or artist_id
     except Exception:
         return artist_id
@@ -280,7 +280,7 @@ def get_label_release_count(label_id: str) -> int:
     """
     try:
         data = _safe_get(
-            f"{API_BASE}/labels/{label_id}/releases",
+            f"{API_BASE}/labels/{_id_path(label_id)}/releases",
             params={"per_page": 1, "page": 1},
         )
         return int(data.get("pagination", {}).get("items", 0))
@@ -297,7 +297,7 @@ def get_label_latest_year(label_id: str) -> int | None:
     """
     try:
         data = _safe_get(
-            f"{API_BASE}/labels/{label_id}/releases",
+            f"{API_BASE}/labels/{_id_path(label_id)}/releases",
             params={"per_page": 1, "page": 1,
                     "sort": "year", "sort_order": "desc"},
         )
@@ -322,7 +322,7 @@ def get_label_earliest_year(label_id: str) -> int | None:
     """
     try:
         data = _safe_get(
-            f"{API_BASE}/labels/{label_id}/releases",
+            f"{API_BASE}/labels/{_id_path(label_id)}/releases",
             params={"per_page": 5, "page": 1,
                     "sort": "year", "sort_order": "asc"},
         )
@@ -354,7 +354,7 @@ def get_release_details(release_id: str) -> dict:
         tracklist — list of {"position": str, "title": str, "artist": str}
                     per-track entries with individual artist names resolved
     """
-    data = _safe_get(f"{API_BASE}/releases/{release_id}")
+    data = _safe_get(f"{API_BASE}/releases/{_id_path(release_id)}")
 
     labels: list[dict] = []
     for lab in (data.get("labels") or []):
@@ -409,9 +409,7 @@ def get_release_details(release_id: str) -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # SEED LABELS → MASTER ARTIST LIST
-# ─────────────────────────────────────────────────────────────────────────────
 
 def get_master_artist_list(
     label_ids: list[str],
@@ -447,7 +445,7 @@ def get_master_artist_list(
     seen: set[str] = set()
 
     for lid in label_ids:
-        url = f"{API_BASE}/labels/{lid}/releases"
+        url = f"{API_BASE}/labels/{_id_path(lid)}/releases"
         for rel in _paged(url):
             # Apply year window before the more expensive release-detail call.
             year = rel.get("year")
@@ -463,7 +461,7 @@ def get_master_artist_list(
             # Fetch the full release record to get the structured artists array.
             # The releases list only provides 'artist' as a plain name string.
             try:
-                data = _safe_get(f"{API_BASE}/releases/{rid}")
+                data = _safe_get(f"{API_BASE}/releases/{_id_path(rid)}")
             except Exception:
                 continue
 
@@ -501,9 +499,7 @@ def get_master_artist_list(
     return artists
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # ARTIST SET → MASTER LABEL ROWS
-# ─────────────────────────────────────────────────────────────────────────────
 
 def get_master_label_rows(
     artists: Iterable[str],
@@ -560,12 +556,12 @@ def get_master_label_rows(
 
     for aid in artists:
         aid = str(aid)
-        url = f"{API_BASE}/artists/{aid}/releases"
 
         # Wrap the paged iterator in a try/except so a 404 or other error
         # on a single artist's releases endpoint skips that artist without
         # aborting the entire crawl.
         try:
+            url = f"{API_BASE}/artists/{_id_path(aid)}/releases"
             artist_rels = list(_paged(url, max_items=max_releases_allowed))
         except Exception:  # noqa: BLE001
             continue
@@ -663,9 +659,7 @@ def get_master_label_rows(
     return rows
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # LABEL → ARTISTS MAPPING
-# ─────────────────────────────────────────────────────────────────────────────
 
 def get_catalog_videos(
     entity_type: str,
@@ -694,9 +688,9 @@ def get_catalog_videos(
             videos (list of {url, title}), label_name
     """
     if entity_type == "label":
-        url = f"{API_BASE}/labels/{entity_id}/releases"
+        url = f"{API_BASE}/labels/{_id_path(entity_id)}/releases"
     else:
-        url = f"{API_BASE}/artists/{entity_id}/releases"
+        url = f"{API_BASE}/artists/{_id_path(entity_id)}/releases"
 
     results: list[dict] = []
 
@@ -768,9 +762,7 @@ def build_label_to_artists(rows: list[dict]) -> dict[str, set[str]]:
     return mapping
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # OPTIONAL HTTP CACHE
-# ─────────────────────────────────────────────────────────────────────────────
 
 def enable_http_cache(cache_name: str = "discogs_cache") -> None:
     """

@@ -23,6 +23,7 @@ def main() -> None:
 
     bootstrap.run(str(app_path), False, [], {
         "client.toolbarMode": "minimal",
+        "server.address": "localhost",
         "theme.primaryColor": "#00DDFF",
         "theme.backgroundColor": "#00161A",
         "theme.secondaryBackgroundColor": "#003842",

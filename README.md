@@ -2,14 +2,21 @@
 
 ![dne app screenshot](dne_app.png)
 
-A Streamlit app for exploring relationships between Discogs labels and artists. Crawls the Discogs API to discover which labels share rosters, visualises the network as an interactive graph, and exports results as a multi-sheet Excel report.
+greetings,
 
-## Requirements
+music has the capacity to create profoundly powerful experiences, moments, spaces, and communities..yet I have had many periods in recent years where I didn't have the energy to search for new music because the process made me feel lost..I am sure many of us get plenty enough of that feeling from various other aspects of the world we live in. I made this tool to find inspiration to look for music and to have hope/trust in what is found..and use that wonderful energy to create spaces for healing, growth, unity, and resistance against elitism.
+
+the idea, or the way I use dne anyway, is to pick music labels or artists that I 'trust'..to collaborate with like-minded artists who lift up local communities, talents, spaces, advocate for unity, and oppose elitism.
+
+to find new music, provide 'trusted' inputs in the form of artist and/or label IDs on from discogs.com (an accessible, fairly comprehensive database for music releases, both old and new). dne will pool all associated artists with your inputs and find new labels that host multiple (or many) of the input artists. in effect, with just a search or two, you can use dne to map semi-local communities centered around a particular sound house with shared values..and enjoy/support their work!
+
+
+## what you need
 
 - Python 3.10 or newer
-- A [Discogs personal access token](https://www.discogs.com/settings/developers) (free account required)
+- a free [Discogs personal access token](https://www.discogs.com/settings/developers), unless you only use the local database
 
-## Installation
+## install
 
 ```bash
 git clone https://github.com/n7cody/discogs-network-explorer.git
@@ -17,171 +24,168 @@ cd discogs-network-explorer
 pip install -e .
 ```
 
-## Running the app
+this installs `dne`, which opens the app in your browser, and `dne-update`, which builds the optional local database.
+
+## run the app
 
 ```bash
 dne
 ```
 
-This opens the app in your browser. Paste your Discogs token into the **Authentication** field in the sidebar before running any analysis.
+the app opens in your browser. it runs on `localhost` only, so other devices on your network cannot reach it.
 
-Optionally store your token in a `.env` file at the repo root so you do not have to paste it each session:
+paste your Discogs token into the Authentication field in the sidebar. to skip this step next time, save it in a `.env` file in your home folder or the folder you run `dne` from:
 
 ```
 DISCOGS_TOKEN=your_token_here
 ```
 
-## Seed modes
+dne reads only `DISCOGS_TOKEN` from `.env` and ignores anything else in the file.
 
-| Mode | What it does |
-|------|-------------|
-| **Labels Only** | Finds all labels that share artists with one or more seed labels |
-| **Labels + Artists** | Requires every discovered label to also contain specific seed artists |
-| **Artists Only** | Finds labels that share a minimum number of artists from an explicit artist ID list |
+choose your seeds and settings, then click Run Analysis.
 
-## Discovery settings (sidebar)
+## data source
 
-| Setting | Description |
-|---------|-------------|
-| Year range | Restrict releases to a date window |
-| Max releases per label | How many releases to crawl per label (default 40) |
-| Max releases per artist | How many releases to crawl per discovered artist (default 40) |
-| Min releases per label | Drop labels with fewer than N total releases in the dataset |
-| Min releases per artist | Drop artists with fewer than N total releases in the dataset |
-| Release Activity Window | Require labels/artists to have releases within a specific year span |
-| Max global releases | Skip labels whose total Discogs catalogue exceeds this threshold |
+dne can read Discogs data from the live Discogs API or from a local database built on your machine.
 
-## Network graph
+with no local database, the app uses the Discogs API and the sidebar suggests running `dne-update` in a terminal. once a local database exists, the Data Source section in the sidebar lets you pick Local database or Discogs API. Local database is the default.
 
-Two graph types are available via **Graph Options** in the sidebar:
+- Local database is instant and works offline. it shows the date of the Discogs data dump it was built from.
+- Discogs API is live and current but slow, about one request per second.
 
-- **Label → Label** — undirected graph where edges connect labels sharing at least N artists
-- **Artist → Label** — bipartite graph showing which artists appear on which labels
+the Discogs token field and the HTTP cache settings appear only in Discogs API mode. the local database needs no token.
 
-## Excel export
+in Discogs API mode, Enable HTTP cache keeps successful responses for 24 hours in `discogs_cache.sqlite`, in the folder you run `dne` from. this makes repeat runs fast. use Clear cache if you want fresh data or see unexpected errors.
 
-The **Results** tab produces a `.xlsx` file with three sheets:
+## search
 
-1. **Run Info** — seed configuration, search parameters, and the discovered/input artist list
-2. **All Releases** — every release row pulled during the crawl
-3. **Discovered Labels** — one row per label with artist names, total Discogs release count, overlap percentage, earliest/latest year, and label ID
+there are three ways to search:
 
-## dnx — Discogs Network Xtractor
+- Labels Only finds labels that share artists with your labels
+- Labels + Artists does the same but keeps only labels that also have the artists you name
+- Artists Only finds labels that host several of the artists you name
 
-**dnx** builds playlists on **YouTube** or **Apple Music** from labels or artists discovered during an analysis. A platform selector at the top of the dnx section lets you choose your target.
+enter label and artist IDs as numbers, separated by commas or new lines. up to 500 IDs are accepted.
 
-- **YouTube** — extracts community-curated YouTube links embedded on Discogs release pages. No YouTube API cost to discover most tracks. Search fallback (off by default) finds tracks for releases without embedded links.
-- **Apple Music** — all tracks go through Apple Music catalog search (Discogs has no Apple Music embeds). Search fallback defaults to ON.
+the settings most people change:
 
-dnx appears at the bottom of the app after running an analysis.
+- Release year range sets which seed releases define the artist pool
+- Max releases per discovered label skips labels with large catalogs, in Discogs API mode only
+- Max releases per artist sets how many releases are read per artist, in Discogs API mode only
+- Min releases per label and Min releases per artist drop small labels and artists from the results
+- Release Activity Window keeps only labels that were active within a span of years
 
-### Match quality scoring
+Labels Only also has Min shared artists from seed union and Strict mode, which asks for overlap with every seed label. Artists Only has Min shared artists from input list.
 
-When dnx searches YouTube or Apple Music for tracks, each result is scored by comparing the Discogs artist name and track title against the platform's returned match:
+in Discogs API mode the release caps keep the number of requests manageable, so results are a sample. in local database mode the caps are hidden and every release is read.
 
-| Verdict | Criteria | Action |
-|---------|----------|--------|
-| **Accept** | Artist similarity >= 0.7 and track similarity >= 0.5 | Added to playlist automatically |
-| **Borderline** | Artist similarity >= 0.5 but below accept threshold | Shown in a review table with checkboxes |
-| **Reject** | Artist similarity < 0.5 | Discarded (shown in collapsed expander) |
+changes to these settings need another click on Run Analysis.
 
-Borderline tracks default to unchecked — you opt in. Accepted borderline tracks are re-inserted at their original position so the playlist stays in release order.
+## results and downloads
 
-### YouTube API setup (one-time)
+after a run, the Result Filters in the sidebar narrow the results without fetching again. you can filter by year, label size, format, country, artist role, genre and style. the year filter starts from the release year range you searched with.
 
-dnx uses the YouTube Data API v3 to create playlists. You need a free Google Cloud project:
+Graph Options switches between a Label → Label graph, where labels are linked by shared artists, and an Artist → Label graph. in the Label → Label graph, node size shows how many seed artists a label has, fill colour shows its latest release year and border colour its earliest. the graph can be downloaded as a PNG.
 
-1. **Create a Google Cloud project**
-   - Go to [Google Cloud Console](https://console.cloud.google.com/)
-   - Click the project dropdown at the top → **New Project** → give it any name (e.g. "DNX") → **Create**
+the Results tab has Download results (CSV), a ZIP of three files:
 
-2. **Enable the YouTube Data API v3**
-   - Go to [APIs & Services → Library](https://console.cloud.google.com/apis/library)
-   - Search for **YouTube Data API v3** → click it → **Enable**
+- `seed_info.csv` holds your seeds, search settings, the data source with its dump date if local, and the artist list
+- `all_releases.csv` holds every release row found
+- `discovered_labels.csv` has one row per label with its shared artists, release counts and years
 
-3. **Configure the OAuth consent screen**
-   - Go to [APIs & Services → OAuth consent screen](https://console.cloud.google.com/apis/credentials/consent)
-   - Choose **External** → **Create**
-   - Fill in the required fields (app name, your email for support contact and developer contact) — other fields can be left blank
-   - Skip the **Scopes** step (click Save and Continue)
-   - Go to the **Audience** tab (left sidebar) → under **Test users**, click **Add Users** and enter your own Google/Gmail email address
-   - Click **Save and Continue** → **Back to Dashboard**
+the Report tab bundles the graph PNG and the same three CSV files into one ZIP.
 
-4. **Create OAuth credentials**
-   - Go to [APIs & Services → Credentials](https://console.cloud.google.com/apis/credentials)
-   - Click **Create Credentials** → **OAuth client ID**
-   - Application type: **Desktop app**
-   - Name: anything (e.g. "dnx")
-   - Click **Create**
-   - Click **Download JSON** on the confirmation dialog
-   - Save the file as `~/client_secret.json` (or any path — you'll enter the path in the app)
+text cells that start with `=`, `+`, `-` or `@` get a leading `'` so spreadsheet apps do not treat them as formulas.
 
-5. **Connect in the app**
-   - In the dnx section, enter the path to your `client_secret.json`
-   - Click **Connect YouTube** — your browser will open for Google authorization
-   - Authorize the app — the token is saved to `~/.dne/youtube_token.json` for future sessions
+## dnx playlists
 
-### YouTube API quota
+dnx builds YouTube or Apple Music playlists from labels or artists you found with dne. it appears at the bottom of the app after you run an analysis.
 
-The free daily quota is 10,000 units. dnx primarily uses Discogs-embedded video links (zero YouTube API cost to discover). The only API calls are playlist operations:
+pick a platform at the top of the dnx section:
 
-| Operation | Cost |
-|-----------|------|
-| Create playlist | 50 units |
-| Add video to playlist | 50 units per video |
-| YouTube search (fallback, off by default) | 100 units per search |
+- YouTube uses the video links already on Discogs release pages. search fallback, off by default, looks up releases without links.
+- Apple Music searches the Apple Music catalog for every track. search fallback is on by default.
+- Apple+YT tries Apple Music first and puts tracks it cannot find into a YouTube playlist instead.
 
-A typical run adding 100 videos costs ~5,050 units — well within the daily limit.
+you can enter label names from your current results, label IDs or artist IDs, plus a year range. in Discogs API mode, Max releases per label/artist sets how many releases each input contributes. in local database mode, dnx takes the newest releases up to 400 items per label or artist.
 
-### Apple Music setup (one-time)
+dnx adds close matches automatically and asks you to review uncertain ones. tracks it could not find can be downloaded as `dnx_unobtained.csv`.
 
-dnx uses Apple's MusicKit API. You need a paid [Apple Developer Program](https://developer.apple.com/programs/) membership ($99/year).
+### YouTube setup
 
-1. **Register a Media ID**
-   - Sign in to [Apple Developer](https://developer.apple.com/account) → Certificates, Identifiers & Profiles → **Identifiers**
-   - Click **"+"** → select **Media IDs** → Continue
-   - Enter a description (e.g. "dnx") and identifier (e.g. `com.yourname.dnx`)
-   - Check **MusicKit** → Continue → Register
+dnx uses the YouTube Data API, which needs a free Google Cloud project. you only do this once.
 
-2. **Create a MusicKit key**
-   - Go to **Keys** → click **"+"**
-   - Check **MusicKit**, associate it with the Media ID you just created, give it a name (e.g. "dnx")
-   - Download the `.p8` private key file (you can only download it once)
-   - Note your **Team ID** (top-right of the portal, 10 characters) and **Key ID** (shown on the key details page, 10 characters)
+1. open the [Google Cloud Console](https://console.cloud.google.com/) and create a new project with any name
+2. open [APIs & Services Library](https://console.cloud.google.com/apis/library), search for YouTube Data API v3 and click Enable
+3. open the [OAuth consent screen](https://console.cloud.google.com/apis/credentials/consent), choose External and click Create
+4. fill in the app name and your email address, leave the other fields blank and skip the Scopes step
+5. in the Audience tab, add your own Google email address under Test users
+6. open [Credentials](https://console.cloud.google.com/apis/credentials), click Create Credentials, then OAuth client ID
+7. choose Desktop app as the application type, give it any name and click Create
+8. click Download JSON and save the file as `~/client_secret.json`, or anywhere you like
+9. in the dnx section, enter the path to that file and click Connect YouTube
+10. sign in to Google in the browser window that opens and allow access
 
-3. **Get a Music User Token**
-   - Generate a developer token (JWT) in Python:
-     ```python
-     from discogs_network_explorer.apple_music import generate_developer_token
-     print(generate_developer_token("YOUR_TEAM_ID", "YOUR_KEY_ID", "~/AuthKey_XXXXXX.p8"))
-     ```
-   - Save the HTML page from `apple_music_setup.txt`, paste your developer token into the `DEVELOPER_TOKEN` line
-   - Serve the file over localhost (`python3 -m http.server 8080`) and open it in **Safari**
-   - Click Authorize, sign in with your Apple ID, and copy the Music User Token
+YouTube gives you a free daily allowance. dnx finds most videos through links already on Discogs, so the allowance is spent mostly on building the playlist. a playlist of 100 videos uses about half of it.
 
-4. **Connect in the app**
-   - In the dnx section, select **Apple Music**
-   - Enter your Team ID, Key ID, path to `.p8` file, and Music User Token
-   - Click **Connect Apple Music** — credentials are saved to `~/.dne/` for future sessions
+### Apple Music setup
 
-### Apple Music notes
+dnx uses Apple's MusicKit, which needs a paid [Apple Developer Program](https://developer.apple.com/programs/) membership. you only do this once. the full steps and the helper page are in [`apple_music_setup.txt`](apple_music_setup.txt).
 
-- The developer token auto-regenerates from your `.p8` key when it expires (~6 months)
-- The Music User Token may expire — re-authorize via the HTML page if playlist creation fails
-- Apple Music catalog search has no per-query quota limit
-- The storefront country code should match your Apple Music subscription region (e.g. `us`, `gb`, `de`)
+1. in your [Apple Developer account](https://developer.apple.com/account), open Identifiers and register a new Media ID with MusicKit checked
+2. open Keys, create a new key with MusicKit checked and link it to that Media ID
+3. download the `.p8` key file. you can download it only once
+4. note your Team ID, shown at the top right of the portal, and the Key ID, shown on the key page
+5. follow `apple_music_setup.txt` to get a Music User Token in Safari
+6. in the dnx section, select Apple Music, enter your Team ID, Key ID, the path to the `.p8` file and the Music User Token
+7. click Connect Apple Music
 
-## HTTP cache
+set the storefront to the country of your Apple Music subscription, for example `us`, `gb` or `de`. the app renews the developer token from your `.p8` key on its own. if playlist creation starts failing, get a new Music User Token.
 
-Enable **Cache HTTP responses** in the sidebar to store API responses in `discogs_cache.sqlite`. Subsequent runs reuse cached data, making re-analysis near-instant. Clear the cache from the sidebar when you want fresh data.
+## local database
 
-## Privacy Policy
+the local database is a copy of the monthly Discogs data dump, built on your machine. once built, searches run in seconds, need no network and have no release caps. the data is as fresh as the latest monthly dump.
 
-See [privacy_policy.md](privacy_policy.md) for details on how dne/dnx handles data and API credentials.
-
-## Development
+to build it, run this in a terminal:
 
 ```bash
-pip install -e .      # editable install — changes to src/ take effect immediately
-dne                   # run the app
+dne-update
 ```
+
+the first build takes about 80 minutes plus download time. it needs up to 40 GB of free disk while it runs and about 10 GB once built.
+
+the database goes in `~/.dne/discogs_db` by default. to put it somewhere else, set `DNE_DB_PATH` or pass `--db-path`.
+
+run `dne-update` again later to move to a newer dump. it downloads and builds only if a newer monthly dump is out, and the app can stay open while it runs. `dne-update --help` lists the other options.
+
+## update dne
+
+```bash
+git pull
+pip install -e .
+dne-update  # optional, refreshes the local database
+```
+
+## stored credentials
+
+your YouTube token and Apple Music settings are saved in `~/.dne/`, readable only by you. files saved by older versions keep their old permissions until they are next written. to tighten them now:
+
+```bash
+chmod 700 ~/.dne
+chmod 600 ~/.dne/*.json ~/.dne/*.txt
+```
+
+## privacy policy
+
+see [privacy_policy.md](privacy_policy.md) for how dne and dnx handle data and credentials.
+
+## development
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+the tests run offline against a small sample of the dump in `tests/fixtures/`. `tests/test_parity.py` compares the local database with cached API responses and runs only when both a full local database and `discogs_cache.sqlite` exist. set `DNE_PARITY_CACHE` to use a different cache file.
+
+`dne-update` also takes `--dump YYYYMMDD` to build a specific dump, `--force` to rebuild, `--keep-downloads` to keep the downloaded files, `--limit N` for a quick partial build and `--memory-limit SIZE` to cap memory use. a failed or interrupted build leaves the previous database untouched.

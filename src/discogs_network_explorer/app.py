@@ -4,19 +4,21 @@ app.py — Streamlit web interface for Discogs Network Explorer.
 Architecture — two-phase processing:
 
   Phase 1 (fetch):
-      Triggered by the "Run Analysis" button.  Makes live Discogs API
-      calls to build the raw dataset, then stores it in st.session_state.
-      Only runs when the button is clicked; results persist across reruns.
+      Triggered by the "Run Analysis" button.  Queries the selected data
+      source (local database or Discogs API) to build the raw dataset,
+      then stores it in st.session_state.  Only runs when the button is
+      clicked; results persist across reruns.
 
   Phase 2 (filter + display):
       Runs on every Streamlit rerender.  Applies all filter controls to
-      the cached raw dataset without making further API calls.  This
-      lets users explore the data interactively by adjusting sliders
-      and multiselects without waiting for another full crawl.
+      the cached raw dataset without fetching again.  This lets users
+      explore the data interactively by adjusting sliders and
+      multiselects without waiting for another full crawl.
 
 Sidebar layout:
-  Authentication        — token input
-  Settings              — HTTP cache toggle
+  Data Source           — local database or Discogs API
+  Authentication        — token input (API only)
+  Settings              — HTTP cache toggle (API only)
   Seed Configuration    — mode selector, seed label / artist IDs
   Discovery Caps        — year range, per-label / per-artist release caps,
                           min releases per label / artist,
@@ -37,25 +39,15 @@ import datetime
 import io
 import os
 import zipfile
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
-from discogs_network_explorer.backend import (
-    build_label_to_artists,
-    clear_http_cache,
-    enable_http_cache,
-    get_artist_name,
-    get_catalog_videos,
-    get_label_earliest_year,
-    get_label_latest_year,
-    get_label_name,
-    get_label_release_count,
-    get_master_artist_list,
-    get_master_label_rows,
-)
+from discogs_network_explorer.backends import get_backend, snapshot_available
+from discogs_network_explorer.ingest.build import read_meta
 from discogs_network_explorer.filters import (
     apply_artists_only_mode,
     apply_label_only_mode,
@@ -98,76 +90,130 @@ from discogs_network_explorer.apple_music import (
     save_user_token as am_save_user_token,
     search_song as am_search_song,
 )
+from discogs_network_explorer.sanitize import (
+    check_apple_id,
+    check_storefront,
+    check_token,
+    clean_text,
+    csv_safe,
+    md_escape,
+    parse_ids,
+    parse_names,
+    resolve_file,
+)
 
 # Current calendar year used as the upper bound for year-range sliders.
 CURRENT_YEAR: int = datetime.date.today().year
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
-# ─────────────────────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="dne — Discogs Network Explorer", layout="wide")
 st.title("dne — Discogs Network Explorer")
 
-# Load .env from the project root or home directory (dev convenience only).
+# Load DISCOGS_TOKEN from .env in the launch directory or home directory.
+# Other keys are ignored so a stray .env cannot set proxies or CA bundles.
 for _env_path in [".", os.path.expanduser("~")]:
     _env_file = os.path.join(_env_path, ".env")
     if os.path.exists(_env_file):
-        load_dotenv(_env_file, override=False)
+        _env_token = dotenv_values(_env_file).get("DISCOGS_TOKEN")
+        if _env_token and not os.getenv("DISCOGS_TOKEN"):
+            os.environ["DISCOGS_TOKEN"] = _env_token
         break
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SIDEBAR — AUTHENTICATION
-# ─────────────────────────────────────────────────────────────────────────────
+# SIDEBAR — DATA SOURCE
 
-st.sidebar.header("Authentication")
+st.sidebar.header("Data Source")
 
-token_input = st.sidebar.text_input(
-    "Discogs personal access token",
-    value="",
-    type="password",
-    help="Generate a token at discogs.com → Settings → Developers.",
+_SOURCE_LABELS = {"snapshot": "Local database", "api": "Discogs API"}
+
+
+def _dump_label() -> str:
+    """The local database's dump date as YYYY-MM-DD, or "" when unreadable."""
+    meta = read_meta(get_backend("snapshot").snapshot_path() or Path())
+    d = str((meta or {}).get("dump_date") or "")
+    return f"{d[:4]}-{d[4:6]}-{d[6:]}" if len(d) == 8 else d
+
+
+if snapshot_available():
+    _dump_date = _dump_label()
+    data_source = st.sidebar.radio(
+        "Where results come from",
+        options=["snapshot", "api"],
+        format_func=_SOURCE_LABELS.get,
+        captions=[
+            f"Instant, offline. Discogs data dump of {_dump_date or 'unknown date'}.",
+            "Live and current, but slow (about one request per second).",
+        ],
+    )
+else:
+    _dump_date = ""
+    data_source = "api"
+    st.sidebar.markdown("**Discogs API**")
+    st.sidebar.caption(
+        "No local database found. To query an offline copy of Discogs instead, "
+        "run `dne-update` in a terminal. The first build takes about 80 minutes "
+        "and needs up to 40 GB of free disk (about 10 GB once built)."
+    )
+
+B = get_backend(data_source)
+_source_desc = (
+    f"local database (dump {_dump_date or 'unknown'})" if data_source == "snapshot"
+    else "Discogs API"
 )
 
-if token_input:
-    # Strip whitespace to guard against trailing newlines or spaces from copy-paste.
-    os.environ["DISCOGS_TOKEN"] = token_input.strip()
 
-if not os.getenv("DISCOGS_TOKEN"):
-    st.warning("Enter your Discogs personal access token in the sidebar to continue.")
-    st.stop()
+if data_source == "api":
+    # SIDEBAR — AUTHENTICATION
+
+    st.sidebar.header("Authentication")
+
+    token_input = st.sidebar.text_input(
+        "Discogs personal access token",
+        value="",
+        type="password",
+        help="Generate a token at discogs.com → Settings → Developers.",
+    )
+
+    if token_input:
+        # Strip whitespace to guard against trailing newlines or spaces from copy-paste.
+        os.environ["DISCOGS_TOKEN"] = token_input.strip()
+
+    if not os.getenv("DISCOGS_TOKEN"):
+        st.warning("Enter your Discogs personal access token in the sidebar to continue.")
+        st.stop()
+
+    try:
+        check_token(os.environ["DISCOGS_TOKEN"], "Discogs token")
+    except ValueError as _exc:
+        st.error(str(_exc))
+        st.stop()
+
+    # SIDEBAR — SETTINGS
+
+    st.sidebar.header("Settings")
+
+    cache_on = st.sidebar.checkbox(
+        "Enable HTTP cache (24 h)",
+        value=True,
+        help="Caches successful Discogs API responses for 24 hours.  Recommended: "
+             "makes repeated runs instant.  Only HTTP 200 responses are stored — "
+             "error responses are never cached.",
+    )
+    if cache_on:
+        B.enable_http_cache()
+
+    if st.sidebar.button(
+        "Clear cache",
+        help="Delete all cached API responses.  Use this if you are seeing "
+             "unexpected 401 or stale-data errors from a previous session.",
+    ):
+        B.clear_http_cache()
+        st.sidebar.success("Cache cleared.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SIDEBAR — SETTINGS
-# ─────────────────────────────────────────────────────────────────────────────
-
-st.sidebar.header("Settings")
-
-cache_on = st.sidebar.checkbox(
-    "Enable HTTP cache (24 h)",
-    value=True,
-    help="Caches successful Discogs API responses for 24 hours.  Recommended: "
-         "makes repeated runs instant.  Only HTTP 200 responses are stored — "
-         "error responses are never cached.",
-)
-if cache_on:
-    enable_http_cache()
-
-if st.sidebar.button(
-    "Clear cache",
-    help="Delete all cached API responses.  Use this if you are seeing "
-         "unexpected 401 or stale-data errors from a previous session.",
-):
-    clear_http_cache()
-    st.sidebar.success("Cache cleared.")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # SIDEBAR — SEED CONFIGURATION
-# ─────────────────────────────────────────────────────────────────────────────
 
 st.sidebar.header("Seed Configuration")
 
@@ -187,36 +233,38 @@ seed_labels_raw = st.sidebar.text_area(
     "Seed label IDs (comma or newline separated)",
     "3661094,1390196",
 )
-seed_label_ids: list[str] = [
-    s.strip()
-    for s in seed_labels_raw.replace("\n", ",").split(",")
-    if s.strip()
-]
+_seed_errors: list[str] = []
+try:
+    seed_label_ids: list[str] = parse_ids(seed_labels_raw, "label")
+except ValueError as _exc:
+    seed_label_ids = []
+    _seed_errors.append(str(_exc))
 
 seed_artists_raw = st.sidebar.text_area(
     "Seed artist IDs (comma or newline separated)",
     "",
     help="Required for 'Labels + Artists' and 'Artists Only' modes.",
 )
-seed_artist_ids: list[str] = [
-    s.strip()
-    for s in seed_artists_raw.replace("\n", ",").split(",")
-    if s.strip()
-]
+try:
+    seed_artist_ids: list[str] = parse_ids(seed_artists_raw, "artist")
+except ValueError as _exc:
+    seed_artist_ids = []
+    _seed_errors.append(str(_exc))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # SIDEBAR — DISCOVERY CAPS
-# ─────────────────────────────────────────────────────────────────────────────
 
 st.sidebar.header("Discovery Caps")
 
 st.sidebar.caption(
     "Year range and release caps control what the API crawl fetches. "
     "Changes here require clicking **Run Analysis** again."
+    if data_source == "api" else
+    "The year range sets which seed releases define the artist pool. "
+    "Changes here require clicking **Run Analysis** again."
 )
 
-# ── Release year range (fetch-time filter) ───────────────────────────────────
+# Release year range (fetch-time filter)
 # Controls which releases are considered during the API crawl.
 # Releases outside [fetch_year_min, fetch_year_max] are skipped before
 # the more expensive release-detail API call is made.
@@ -232,34 +280,39 @@ fetch_year_min, fetch_year_max = st.sidebar.slider(
          "outside this range may not be discovered.",
 )
 
-# ── Per-entity release caps ───────────────────────────────────────────────────
+# API-only caps; the local database reads every release at no cost.
+max_releases_per_label: int = 0
+max_releases_per_artist: int = 0
+
+# Per-entity release caps
 # Hard limits on how many releases are fetched per seed label / artist.
 # These cap API cost; they do not filter by quality.
 
-max_releases_per_label = st.sidebar.number_input(
-    "Max releases per discovered label (0 = no limit)",
-    min_value=0,
-    max_value=50_000,
-    value=40,
-    step=10,
-    help="Exclude any discovered label whose total Discogs catalog exceeds "
-         "this number. Labels are screened and discarded as early as possible "
-         "during the crawl to avoid wasting API calls on large ambient labels "
-         "(e.g. Resident Advisor, Dekmantel). 0 = no limit. Adds one cached "
-         "API call per newly-encountered label on first run.",
-)
+if data_source == "api":
+    max_releases_per_label = st.sidebar.number_input(
+        "Max releases per discovered label (0 = no limit)",
+        min_value=0,
+        max_value=50_000,
+        value=40,
+        step=10,
+        help="Exclude any discovered label whose total Discogs catalog exceeds "
+             "this number. Labels are screened and discarded as early as possible "
+             "during the crawl to avoid wasting API calls on large ambient labels "
+             "(e.g. Resident Advisor, Dekmantel). 0 = no limit. Adds one cached "
+             "API call per newly-encountered label on first run.",
+    )
 
-max_releases_per_artist = st.sidebar.slider(
-    "Max releases per artist",
-    min_value=2,
-    max_value=200,
-    value=40,
-    step=1,
-    help="Maximum releases fetched per discovered artist. "
-         "Each release requires one extra API call for label data.",
-)
+    max_releases_per_artist = st.sidebar.slider(
+        "Max releases per artist",
+        min_value=2,
+        max_value=200,
+        value=40,
+        step=1,
+        help="Maximum releases fetched per discovered artist. "
+             "Each release requires one extra API call for label data.",
+    )
 
-# ── Minimum release thresholds (post-fetch quality filters) ──────────────────
+# Minimum release thresholds (post-fetch quality filters)
 # These are applied to the fetched dataset rather than during the crawl.
 # Conceptually grouped here because they answer "how active must a
 # label / artist be to appear in results?"
@@ -284,7 +337,7 @@ min_releases_per_artist = st.sidebar.slider(
          "dataset are excluded from results.  0 = no minimum.",
 )
 
-# ── Release Activity Window (optional) ───────────────────────────────────────
+# Release Activity Window (optional)
 # When enabled, labels — and artists in artist-seed modes — must have at
 # least a specified number of releases within a defined year window.
 # This confirms ongoing activity and excludes dormant entities.
@@ -349,7 +402,7 @@ if activity_window_on:
     )
 
 
-# ── Mode A / C overlap controls ───────────────────────────────────────────────
+# Mode A / C overlap controls
 min_overlaps_required: int = 2
 strict_per_label: bool = False
 artist_min_overlaps: int = 2
@@ -390,12 +443,14 @@ elif seed_mode == "Artists Only":
 run_btn = st.sidebar.button("Run Analysis", type="primary", use_container_width=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # PHASE 1 — FETCH (runs only on button click)
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _validate_inputs() -> None:
-    """Stop with an error message if the required seed IDs are missing."""
+    """Stop with an error message if seed IDs are malformed or missing."""
+    if _seed_errors:
+        for _err in _seed_errors:
+            st.error(md_escape(_err))
+        st.stop()
     if seed_mode in {"Labels Only", "Labels + Artists"} and not seed_label_ids:
         st.error(f"Mode '{seed_mode}' requires at least one seed label ID.")
         st.stop()
@@ -406,11 +461,15 @@ def _validate_inputs() -> None:
 
 if run_btn:
     _validate_inputs()
+    if data_source == "snapshot" and not snapshot_available():
+        st.error("The local database is no longer available. Run `dne-update` "
+                 "in a terminal, or choose Discogs API.")
+        st.stop()
 
     # Step 1a: build the artist pool from seed labels (if applicable).
     if seed_mode in {"Labels Only", "Labels + Artists"}:
         with st.spinner("Crawling seed labels for artists…"):
-            label_artists = get_master_artist_list(
+            label_artists = B.get_master_artist_list(
                 seed_label_ids,
                 min_year=fetch_year_min,
                 max_year=fetch_year_max,
@@ -425,8 +484,7 @@ if run_btn:
     if not artists:
         st.error(
             "No artists discovered from your seeds. "
-            "Try increasing Max releases per seed label, widening the year "
-            "range, or checking your seed IDs."
+            "Try widening the year range or checking your seed IDs."
         )
         st.stop()
 
@@ -435,8 +493,10 @@ if run_btn:
         f"Fetching releases for {len(artists)} artist(s) — "
         "first run may take many minutes depending on number of artists, "
         "subsequent runs use cache…"
+        if data_source == "api" else
+        f"Reading releases for {len(artists)} artist(s) from the local database…"
     ):
-        rows = get_master_label_rows(
+        rows = B.get_master_label_rows(
             artists,
             max_releases_allowed=max_releases_per_artist,
             min_year=fetch_year_min,
@@ -449,7 +509,7 @@ if run_btn:
 
     if not rows:
         st.error(
-            "No release rows returned from Discogs. "
+            "No release rows returned. "
             "Try widening the year range or adjusting your seeds."
         )
         st.stop()
@@ -461,6 +521,9 @@ if run_btn:
         "role", "format", "genres", "styles", "country", "year",
     ]
     df_raw = pd.DataFrame(rows)
+    # The local database gives format names and descriptions separately.
+    if "format_names" in df_raw.columns:
+        df_raw = df_raw.rename(columns={"format_names": "format"})
     # Enforce a stable column order so the CSV export is always consistent.
     df_raw = df_raw.reindex(
         columns=[c for c in _COL_ORDER if c in df_raw.columns]
@@ -472,17 +535,26 @@ if run_btn:
     # session state — Phase 2 filter reruns never make year API calls.
     all_label_ids = list(df_raw["label_id"].astype(str).unique())
     label_years_map: dict[str, dict[str, int | None]] = {}
-    progress = st.progress(0, text="Collecting label year data…")
-    for idx, lid in enumerate(all_label_ids):
-        label_years_map[lid] = {
-            "earliest": get_label_earliest_year(lid),
-            "latest":   get_label_latest_year(lid),
-        }
-        progress.progress(
-            (idx + 1) / len(all_label_ids),
-            text=f"Collecting label year data… {idx + 1}/{len(all_label_ids)}",
-        )
-    progress.empty()
+    label_counts_map: dict[str, int] = {}
+    if data_source == "snapshot":
+        for _stat in B.get_label_stats(all_label_ids + [str(s) for s in seed_label_ids]):
+            label_years_map[_stat["label_id"]] = {
+                "earliest": _stat["earliest_year"],
+                "latest":   _stat["latest_year"],
+            }
+            label_counts_map[_stat["label_id"]] = _stat["catalog_size"] or 0
+    else:
+        progress = st.progress(0, text="Collecting label year data…")
+        for idx, lid in enumerate(all_label_ids):
+            label_years_map[lid] = {
+                "earliest": B.get_label_earliest_year(lid),
+                "latest":   B.get_label_latest_year(lid),
+            }
+            progress.progress(
+                (idx + 1) / len(all_label_ids),
+                text=f"Collecting label year data… {idx + 1}/{len(all_label_ids)}",
+            )
+        progress.empty()
 
     # Persist the raw dataset and crawl parameters so filter controls can
     # operate on it without triggering another API crawl.
@@ -492,6 +564,10 @@ if run_btn:
     st.session_state["seed_artist_ids_used"]= seed_artist_ids
     st.session_state["seed_mode_used"]      = seed_mode
     st.session_state["label_years"]         = label_years_map
+    st.session_state["label_counts"]        = label_counts_map
+    st.session_state["source_used"]         = data_source
+    st.session_state["source_desc_used"]    = _source_desc
+    st.session_state["fetch_years_used"]    = (fetch_year_min, fetch_year_max)
 
     st.success(
         f"Crawl complete: {len(artists)} artists, "
@@ -500,9 +576,7 @@ if run_btn:
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # PHASE 2 — FILTER + DISPLAY (runs on every rerender if data exists)
-# ─────────────────────────────────────────────────────────────────────────────
 
 if "df_raw" not in st.session_state:
     st.info(
@@ -519,9 +593,22 @@ _seed_mode_used: str          = st.session_state["seed_mode_used"]
 _all_label_years: dict[str, dict[str, int | None]] = st.session_state.get(
     "label_years", {}
 )
+_label_counts_cache: dict[str, int] = st.session_state.get("label_counts", {})
+# Lookups after the crawl use the source the crawl used.
+B_used = get_backend(st.session_state.get("source_used", "api"))
+_source_desc_used: str = st.session_state.get("source_desc_used", "Discogs API")
+_fetch_min_used, _fetch_max_used = st.session_state.get(
+    "fetch_years_used", (1900, CURRENT_YEAR)
+)
 
 
-# ── Post-fetch filter sidebar ────────────────────────────────────────────────
+def _release_count(lid: str) -> int:
+    if lid not in _label_counts_cache:
+        _label_counts_cache[lid] = B_used.get_label_release_count(lid)
+    return _label_counts_cache[lid]
+
+
+# Post-fetch filter sidebar
 
 st.sidebar.markdown("---")
 st.sidebar.header("Result Filters")
@@ -530,6 +617,9 @@ st.sidebar.caption("Adjust these without re-fetching.")
 # Year range — finer display-level control independent of the fetch window.
 _year_min_data = int(df_raw["year"].dropna().min()) if df_raw["year"].notna().any() else 1900
 _year_max_data = int(df_raw["year"].dropna().max()) if df_raw["year"].notna().any() else CURRENT_YEAR
+# The local database returns every year; start from the crawl's year range.
+_year_min_data = max(_year_min_data, _fetch_min_used)
+_year_max_data = min(_year_max_data, _fetch_max_used)
 
 _col_y1, _col_y2 = st.sidebar.columns(2)
 filter_min_year = _col_y1.number_input(
@@ -556,7 +646,10 @@ filter_max_label_size = st.sidebar.number_input(
 )
 
 # Format, country, role, genre, style — populated from dataset values.
-_available_formats = sorted(f for f in df_raw["format"].dropna().unique() if str(f).strip())
+_format_tokens: set[str] = set()
+for _cell in df_raw["format"].dropna():
+    _format_tokens.update(t.strip() for t in str(_cell).split(",") if t.strip())
+_available_formats = sorted(_format_tokens)
 selected_formats: list[str] = st.sidebar.multiselect(
     "Format", options=_available_formats, default=[],
     help="Leave empty to include all formats.",
@@ -609,7 +702,7 @@ min_shared_artists = st.sidebar.slider(
 
 
 
-# ── Apply filters ─────────────────────────────────────────────────────────────
+# Apply filters
 
 df: pd.DataFrame = df_raw.copy()
 
@@ -725,12 +818,12 @@ for _sid in [str(s) for s in (_seed_labels_used or [])]:
 
 # Collect total release counts for labels surviving filters (used for graph halo sizing).
 _label_release_counts: dict[str, int] = {
-    _lid: get_label_release_count(_lid)
+    _lid: _release_count(_lid)
     for _lid in df["label_id"].astype(str).unique()
 }
 for _sid in [str(s) for s in (_seed_labels_used or [])]:
     if _sid not in _label_release_counts:
-        _label_release_counts[_sid] = get_label_release_count(_sid)
+        _label_release_counts[_sid] = _release_count(_sid)
 
 if df.empty:
     st.warning(
@@ -748,9 +841,7 @@ st.caption(
 )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # CSV OUTPUT BUILDER
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _build_csv_outputs(
     df_results: pd.DataFrame,
@@ -773,9 +864,9 @@ def _build_csv_outputs(
     """
     artist_name_map: dict[str, str] = {}
     for aid in list(artists):
-        artist_name_map[aid] = get_artist_name(aid)
+        artist_name_map[aid] = B_used.get_artist_name(aid)
 
-    # ── Seed Info ────────────────────────────────────────────────────────────
+    # Seed Info
     info_rows: list[dict] = []
     for lid in seed_label_ids_used:
         info_rows.append({
@@ -809,7 +900,7 @@ def _build_csv_outputs(
             "value": artist_name_map.get(aid, f"artist_{aid}"),
         })
 
-    # ── Discovered Labels ────────────────────────────────────────────────────
+    # Discovered Labels
     label_id_to_name: dict[str, str] = {}
     l2a_names: dict[str, dict[str, str]] = {}
     for rec in df_raw.to_dict("records"):
@@ -833,7 +924,7 @@ def _build_csv_outputs(
     for lid, aid_map in sorted(l2a_names.items(), key=lambda x: len(x[1]), reverse=True):
         artist_list = ", ".join(sorted(set(aid_map.values())))
         n_artists = len(aid_map)
-        releases = get_label_release_count(lid)
+        releases = _release_count(lid)
         overlap_ratio = round(releases / n_artists, 2) if n_artists > 0 else 0.0
         yrs = (label_years or {}).get(lid, {})
         row_dict: dict = {
@@ -858,7 +949,7 @@ def _build_csv_outputs(
                 row_dict[col_name] = ""
         label_summary_rows.append(row_dict)
 
-    # ── All Releases ─────────────────────────────────────────────────────────
+    # All Releases
     df_raw_out = df_raw.copy()
     if "artist_name" in df_raw_out.columns and "artist_id" in df_raw_out.columns:
         df_raw_out["artist_name"] = df_raw_out.apply(
@@ -869,15 +960,13 @@ def _build_csv_outputs(
         )
 
     return {
-        "seed_info.csv": pd.DataFrame(info_rows).to_csv(index=False),
-        "all_releases.csv": df_raw_out.to_csv(index=False),
-        "discovered_labels.csv": pd.DataFrame(label_summary_rows).to_csv(index=False),
+        "seed_info.csv": csv_safe(pd.DataFrame(info_rows)).to_csv(index=False),
+        "all_releases.csv": csv_safe(df_raw_out).to_csv(index=False),
+        "discovered_labels.csv": csv_safe(pd.DataFrame(label_summary_rows)).to_csv(index=False),
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # MAIN AREA — TABS
-# ─────────────────────────────────────────────────────────────────────────────
 
 # Normalize a raw label_id value to a plain string key, stripping any
 # trailing ".0" that pandas introduces when a column contains NaNs and
@@ -900,18 +989,18 @@ _seed_ids = [str(s) for s in _seed_labels_used]
 
 # Ensure every seed label has a human-readable name.  Seed labels that
 # have no rows in df_raw (all releases outside the year range) won't
-# appear in _label_names, so we fall back to a direct API call.
+# appear in _label_names, so we fall back to a direct lookup.
 for _sid in _seed_ids:
     if _sid not in _label_names:
-        _label_names[_sid] = get_label_name(_sid)
+        _label_names[_sid] = B_used.get_label_name(_sid)
 
 # Build label→artists mapping from df_raw for seed-label backfill.
-_l2a_raw = build_label_to_artists(df_raw.to_dict("records"))
+_l2a_raw = B_used.build_label_to_artists(df_raw.to_dict("records"))
 
 tab_results, tab_graph, tab_report = st.tabs(["Results", "Graph", "Report"])
 
 
-# ── Tab: Results ─────────────────────────────────────────────────────────────
+# Tab: Results
 
 with tab_results:
     col_left, col_right = st.columns([3, 2])
@@ -920,11 +1009,12 @@ with tab_results:
         st.subheader("Release rows (first 200)")
         st.dataframe(df.head(200), use_container_width=True)
 
-        _excel_params = {
+        _export_params = {
+            "data_source":             _source_desc_used,
             "seed_mode":               _seed_mode_used,
-            "fetch_year_min":          fetch_year_min,
-            "fetch_year_max":          fetch_year_max,
-            "max_releases_per_artist": max_releases_per_artist,
+            "fetch_year_min":          _fetch_min_used,
+            "fetch_year_max":          _fetch_max_used,
+            "max_releases_per_artist": max_releases_per_artist or "no limit",
             "max_releases_per_label":  max_releases_per_label or "no limit",
             "min_releases_per_label":  min_releases_per_label or "no minimum",
             "min_releases_per_artist": min_releases_per_artist or "no minimum",
@@ -948,7 +1038,7 @@ with tab_results:
             seed_artist_ids_used=_seed_artists_used,
             seed_mode_used=_seed_mode_used,
             label_names=_label_names,
-            params=_excel_params,
+            params=_export_params,
             label_years=_label_years,
         )
         _results_zip_buf = io.BytesIO()
@@ -969,6 +1059,7 @@ with tab_results:
     with st.expander("Debug info"):
         st.json(
             {
+                "data_source":     _source_desc_used,
                 "seed_mode":       _seed_mode_used,
                 "seed_labels":     _seed_labels_used,
                 "seed_artists":    _seed_artists_used,
@@ -988,13 +1079,13 @@ with tab_results:
         )
 
 
-# ── Tab: Graph ───────────────────────────────────────────────────────────────
+# Tab: Graph
 
 with tab_graph:
     fig, ax = plt.subplots(figsize=(10, 7))
 
     if network_mode.startswith("Label"):
-        l2a = build_label_to_artists(df.to_dict("records"))
+        l2a = B_used.build_label_to_artists(df.to_dict("records"))
         # Seed labels may be filtered out of df by post-fetch controls; restore
         # their artist sets from df_raw so they retain edges in the graph.
         for _sid in _seed_ids:
@@ -1046,13 +1137,13 @@ with tab_graph:
     )
 
 
-# ── Tab: Report ──────────────────────────────────────────────────────────────
+# Tab: Report
 
 with tab_report:
     st.subheader("Export analysis report")
     st.write(
         "Download a ZIP bundle containing the network graph PNG and the "
-        "full Excel results workbook."
+        "full results as CSV files."
     )
 
     _report_png = st.session_state.get("graph_png")
@@ -1067,7 +1158,7 @@ with tab_report:
         _rep_seed_ids = [str(s) for s in _seed_labels_used]
 
         if network_mode.startswith("Label"):
-            _l2a = build_label_to_artists(df.to_dict("records"))
+            _l2a = B_used.build_label_to_artists(df.to_dict("records"))
             for _sid in _rep_seed_ids:
                 if not _l2a.get(_sid):
                     _l2a[_sid] = _l2a_raw.get(_sid, set())
@@ -1108,9 +1199,7 @@ with tab_report:
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # DNX — DISCOGS NETWORK XTRACTOR (playlist builder)
-# ─────────────────────────────────────────────────────────────────────────────
 
 st.markdown("---")
 st.header("dnx — Discogs Network Xtractor")
@@ -1155,7 +1244,7 @@ def _score_match(
     return "borderline", a, t
 
 
-# ── Platform selector ───────────────────────────────────────────────────────
+# Platform selector
 
 dnx_platform = st.radio(
     "Platform",
@@ -1164,7 +1253,7 @@ dnx_platform = st.radio(
     key="dnx_platform",
 )
 
-# ── YouTube authentication ──────────────────────────────────────────────────
+# YouTube authentication
 
 _yt_connected = False
 _yt_creds = None
@@ -1193,8 +1282,10 @@ if dnx_platform in ("YouTube", "Apple+YT"):
             help="Download this from Google Cloud Console → APIs & Services → Credentials.",
         )
         if st.button("Connect YouTube"):
-            if not os.path.isfile(_client_secret_path):
-                st.error(f"File not found: {_client_secret_path}")
+            try:
+                _client_secret_path = resolve_file(_client_secret_path, ".json", 1_000_000)
+            except ValueError as exc:
+                st.error(md_escape(exc))
             else:
                 try:
                     with st.spinner("Opening browser for Google authorization…"):
@@ -1205,7 +1296,7 @@ if dnx_platform in ("YouTube", "Apple+YT"):
                 except Exception as exc:
                     st.error(f"YouTube authorization failed: {exc}")
 
-# ── Apple Music authentication ──────────────────────────────────────────────
+# Apple Music authentication
 
 _am_connected = False
 _am_config = None
@@ -1257,19 +1348,20 @@ if dnx_platform in ("Apple Music", "Apple+YT"):
                 ),
             )
             if st.button("Connect Apple Music"):
-                if not am_team_id or not am_key_id:
-                    st.error("Team ID and Key ID are required.")
-                elif not os.path.isfile(am_p8_path):
-                    st.error(f"Private key file not found: {am_p8_path}")
-                elif not am_user_token_input.strip():
-                    st.error("Music User Token is required.")
+                try:
+                    am_team_id = check_apple_id(am_team_id, "Team ID")
+                    am_key_id = check_apple_id(am_key_id, "Key ID")
+                    am_p8_path = resolve_file(am_p8_path, ".p8", 64_000)
+                    am_user_token_input = check_token(am_user_token_input, "Music User Token", 8192)
+                except ValueError as exc:
+                    st.error(md_escape(exc))
                 else:
                     try:
                         dev_token = am_save_config(am_team_id, am_key_id, am_p8_path)
                         am_save_user_token(am_user_token_input)
                         _am_connected = True
                         _am_config = am_load_config()
-                        _am_user_token = am_user_token_input.strip()
+                        _am_user_token = am_user_token_input
                         st.success("Apple Music connected! Credentials saved to ~/.dne/")
                         st.rerun()
                     except Exception as exc:
@@ -1281,15 +1373,20 @@ if dnx_platform in ("Apple Music", "Apple+YT"):
             value="us",
             help="ISO 3166-1 alpha-2 country code for your Apple Music subscription (e.g. us, gb, de).",
         )
+        try:
+            am_storefront = check_storefront(am_storefront)
+        except ValueError as exc:
+            st.error(str(exc))
+            st.stop()
 
-# ── Auth check ─────────────────────────────────────────────────────────────
+# Auth check
 
 _needs_yt = dnx_platform in ("YouTube", "Apple+YT")
 _needs_am = dnx_platform in ("Apple Music", "Apple+YT")
 if (_needs_yt and not _yt_connected) or (_needs_am and not _am_connected):
     st.stop()
 
-# ── dnx input ───────────────────────────────────────────────────────────────
+# dnx input
 
 # Build a lookup from label names → label IDs using the current dataset.
 _name_to_lid: dict[str, str] = {}
@@ -1319,16 +1416,19 @@ else:
         placeholder="e.g. 1606986, 2742670",
     )
 
-dnx_max_releases = st.slider(
-    "Max releases per label/artist",
-    min_value=1,
-    max_value=200,
-    value=30,
-    help=(
-        "Limits how many releases to fetch per input from the full Discogs catalog. "
-        "Each release may contribute multiple videos (one per track)."
-    ),
-)
+# The local database fills each playlist with the newest releases up to 400 items.
+dnx_max_releases: int = 30
+if data_source == "api":
+    dnx_max_releases = st.slider(
+        "Max releases per label/artist",
+        min_value=1,
+        max_value=200,
+        value=30,
+        help=(
+            "Limits how many releases to fetch per input from the full Discogs catalog. "
+            "Each release may contribute multiple videos (one per track)."
+        ),
+    )
 
 dnx_col1, dnx_col2 = st.columns(2)
 with dnx_col1:
@@ -1378,9 +1478,18 @@ dnx_search_fallback = st.checkbox(_fb_label, value=_fb_default, help=_fb_help)
 dnx_playlist_name = st.text_input(
     "Playlist name",
     value=f"dnx — {datetime.date.today().isoformat()}",
+    max_chars=145,
 )
+try:
+    dnx_playlist_name = clean_text(dnx_playlist_name, 145, "Playlist name")
+except ValueError as exc:
+    st.error(str(exc))
+    st.stop()
+if not dnx_playlist_name:
+    st.error("Playlist name is required.")
+    st.stop()
 
-# ── Resolve inputs and fetch full catalogs ─────────────────────────────────
+# Resolve inputs and fetch full catalogs
 
 
 def _extract_yt_video_id(url: str) -> str | None:
@@ -1396,7 +1505,14 @@ _dnx_build_un: list[dict] | None = None
 _dnx_build_ar: list[dict] | None = None
 
 if st.button(_btn_labels[dnx_platform], type="primary"):
-    entries = [e.strip() for e in dnx_raw.split(",") if e.strip()]
+    try:
+        if dnx_input_type == "Label names":
+            entries = parse_names(dnx_raw, "Label name")
+        else:
+            entries = parse_ids(dnx_raw, "label" if dnx_input_type == "Label IDs" else "artist")
+    except ValueError as exc:
+        st.error(md_escape(exc))
+        st.stop()
     if not entries:
         st.error("Enter at least one label or artist.")
         st.stop()
@@ -1412,7 +1528,7 @@ if st.button(_btn_labels[dnx_platform], type="primary"):
             else:
                 unresolved.append(name)
         if unresolved:
-            st.warning(f"Could not match label names: {', '.join(unresolved)}")
+            st.warning(f"Could not match label names: {md_escape(', '.join(unresolved))}")
         if not resolved_lids:
             st.error("No labels matched. Check spelling or use label IDs instead.")
             st.stop()
@@ -1429,13 +1545,13 @@ if st.button(_btn_labels[dnx_platform], type="primary"):
     eff_min_year = dnx_min_year if dnx_min_year > 1900 else None
     eff_max_year = dnx_max_year if dnx_max_year < CURRENT_YEAR else None
 
-    # ── Fetch full catalogs via Discogs API ────────────────────────────────
+    # Fetch full catalogs from the selected data source
 
     all_releases: list[dict] = []
-    progress = st.progress(0, text="Fetching catalogs from Discogs…")
+    progress = st.progress(0, text="Fetching catalogs…")
     for eidx, eid in enumerate(entity_ids):
         try:
-            catalog = get_catalog_videos(
+            catalog = B.get_catalog_videos(
                 entity_type=entity_type,
                 entity_id=eid,
                 max_releases=dnx_max_releases,
@@ -1444,7 +1560,7 @@ if st.button(_btn_labels[dnx_platform], type="primary"):
             )
             all_releases.extend(catalog)
         except Exception as exc:
-            st.warning(f"Failed to fetch catalog for {entity_type} {eid}: {exc}")
+            st.warning(f"Failed to fetch catalog for {entity_type} {eid}: {md_escape(exc)}")
         progress.progress(
             (eidx + 1) / len(entity_ids),
             text=f"Fetching catalogs… {eidx + 1}/{len(entity_ids)}",
@@ -1455,7 +1571,7 @@ if st.button(_btn_labels[dnx_platform], type="primary"):
         st.warning("No releases found. Check the IDs and year range.")
         st.stop()
 
-    # ── Collect videos/tracks from fetched releases ─────────────────────────
+    # Collect videos/tracks from fetched releases
     # Every item gets a `seq` index so we can restore release order after
     # the review step merges borderline tracks back in.
 
@@ -1590,7 +1706,7 @@ if st.button(_btn_labels[dnx_platform], type="primary"):
             f"**{len(search_queue)}** tracks queued for Apple Music search."
         )
 
-    # ── Search fallback (per-track) with match scoring ────────────────────
+    # Search fallback (per-track) with match scoring
 
     search_errors: list[str] = []
     accepted_from_search: list[dict] = []
@@ -1879,7 +1995,7 @@ if st.button(_btn_labels[dnx_platform], type="primary"):
     # Add auto-accepted search results to main queue.
     video_queue.extend(accepted_from_search)
 
-    # ── Borderline gate ──────────────────────────────────────────────────
+    # Borderline gate
     # When borderline matches exist, store pipeline state in session_state
     # so the user can review and check boxes at their own pace across
     # Streamlit reruns.  The playlist builds only after explicit confirm.
@@ -1923,9 +2039,7 @@ if st.button(_btn_labels[dnx_platform], type="primary"):
     _dnx_build_ar = all_releases
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # DNX — BORDERLINE REVIEW (persists across Streamlit reruns)
-# ─────────────────────────────────────────────────────────────────────────────
 
 if "dnx_pending" in st.session_state:
     _pending = st.session_state["dnx_pending"]
@@ -1953,6 +2067,7 @@ if "dnx_pending" in st.session_state:
         use_container_width=True,
         hide_index=True,
         key="dnx_borderline_review",
+        disabled=[c for c in _review_df.columns if c != "Include"],
         column_config={
             "Include":      st.column_config.CheckboxColumn("Include", default=False),
             "Artist Score": st.column_config.NumberColumn(format="%.2f"),
@@ -2018,9 +2133,7 @@ if "dnx_pending" in st.session_state:
         _dnx_build_ar = _pending["all_releases"]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # DNX — PLAYLIST BUILD (runs from either path above)
-# ─────────────────────────────────────────────────────────────────────────────
 
 if _dnx_build_vq is not None:
     video_queue = _dnx_build_vq
@@ -2083,7 +2196,7 @@ if _dnx_build_vq is not None:
                 description=_playlist_description,
             )
             playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
-            st.info(f"Created playlist: [{dnx_playlist_name}]({playlist_url})")
+            st.info(f"Created playlist: [{md_escape(dnx_playlist_name)}]({playlist_url})")
 
             added = 0
             failed = 0
@@ -2136,7 +2249,7 @@ if _dnx_build_vq is not None:
                     description=_playlist_description,
                 )
                 yt_playlist_url = f"https://www.youtube.com/playlist?list={yt_playlist_id}"
-                st.info(f"Created YouTube playlist: [{dnx_playlist_name} (YT)]({yt_playlist_url})")
+                st.info(f"Created YouTube playlist: [{md_escape(dnx_playlist_name)} (YT)]({yt_playlist_url})")
 
                 yt_added = 0
                 yt_failed = 0
@@ -2171,7 +2284,7 @@ if _dnx_build_vq is not None:
                     title=dnx_playlist_name,
                     description=am_description,
                 )
-                st.info(f"Created Apple Music playlist: **{dnx_playlist_name}**")
+                st.info(f"Created Apple Music playlist: **{md_escape(dnx_playlist_name)}**")
 
                 am_added = 0
                 am_failed = 0
@@ -2216,7 +2329,7 @@ if _dnx_build_vq is not None:
                 title=dnx_playlist_name,
                 description=_playlist_description,
             )
-            st.info(f"Created Apple Music playlist: **{dnx_playlist_name}**")
+            st.info(f"Created Apple Music playlist: **{md_escape(dnx_playlist_name)}**")
 
             added = 0
             failed = 0
@@ -2282,7 +2395,7 @@ if _dnx_build_vq is not None:
             unobtained_df = pd.DataFrame(unobtained)
             display_order = [c for c in ["artist", "track", "release", "label", "reason", "discogs_url"] if c in unobtained_df.columns]
             st.dataframe(unobtained_df[display_order], use_container_width=True, hide_index=True)
-            _unobtained_csv = unobtained_df[display_order].to_csv(index=False)
+            _unobtained_csv = csv_safe(unobtained_df[display_order]).to_csv(index=False)
             st.download_button(
                 "Download unobtained tracks (CSV)",
                 data=_unobtained_csv,

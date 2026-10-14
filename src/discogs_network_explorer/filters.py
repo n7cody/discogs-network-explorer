@@ -19,9 +19,7 @@ from typing import Iterable
 import pandas as pd
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # GENERIC ROW FILTERS
-# ─────────────────────────────────────────────────────────────────────────────
 
 def filter_by_year_range(
     df: pd.DataFrame,
@@ -60,8 +58,9 @@ def filter_by_format(
     formats: set[str],
 ) -> pd.DataFrame:
     """
-    Keep rows whose 'format' value is in the provided set.
+    Keep rows whose 'format' value contains any of the provided formats.
 
+    'format' may hold several comma-separated formats (e.g. "CD, Vinyl").
     Comparison is case-insensitive.  An empty formats set is treated as
     "no restriction" and the DataFrame is returned unchanged.
     """
@@ -69,7 +68,9 @@ def filter_by_format(
         return df
 
     lower = {f.lower() for f in formats}
-    mask = df["format"].fillna("").str.lower().isin(lower)
+    mask = df["format"].fillna("").astype(str).map(
+        lambda cell: any(t.strip().lower() in lower for t in cell.split(","))
+    )
     return df[mask].copy()
 
 
@@ -155,9 +156,7 @@ def filter_by_styles(
     return df[mask].copy()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # LABEL-SIZE FILTER
-# ─────────────────────────────────────────────────────────────────────────────
 
 def filter_labels_by_size(
     df: pd.DataFrame,
@@ -186,9 +185,7 @@ def filter_labels_by_size(
     return out.drop(columns=[_TMP]).copy()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # LABEL SUMMARY
-# ─────────────────────────────────────────────────────────────────────────────
 
 def unique_labels(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -209,9 +206,7 @@ def unique_labels(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # INTERNAL HELPER
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _label_to_artists_from_df(df: pd.DataFrame) -> dict[str, set[str]]:
     """
@@ -232,9 +227,7 @@ def _label_to_artists_from_df(df: pd.DataFrame) -> dict[str, set[str]]:
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # MODE A — LABELS ONLY
-# ─────────────────────────────────────────────────────────────────────────────
 
 def apply_label_only_mode(
     df: pd.DataFrame,
@@ -302,9 +295,7 @@ def apply_label_only_mode(
     return df[df["label_id"].astype(str).map(_keep)].copy()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # MODE B — LABELS + ARTISTS
-# ─────────────────────────────────────────────────────────────────────────────
 
 def apply_label_plus_artist_mode(
     df: pd.DataFrame,
@@ -344,9 +335,7 @@ def apply_label_plus_artist_mode(
     return df[df["label_id"].astype(str).map(_keep)].copy()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # MODE C — ARTISTS ONLY
-# ─────────────────────────────────────────────────────────────────────────────
 
 def apply_artists_only_mode(
     df: pd.DataFrame,
@@ -374,9 +363,7 @@ def apply_artists_only_mode(
     return df[df["label_id"].astype(str).map(_keep)].copy()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # RELEASE ACTIVITY WINDOW FILTERS
-# ─────────────────────────────────────────────────────────────────────────────
 
 def filter_labels_by_activity_window(
     df: pd.DataFrame,
@@ -439,9 +426,7 @@ def filter_artists_by_activity_window(
     return df[df["artist_id"].isin(qualifying)].copy()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # MINIMUM RELEASE COUNT FILTERS
-# ─────────────────────────────────────────────────────────────────────────────
 
 def filter_by_min_artist_releases(
     df: pd.DataFrame,

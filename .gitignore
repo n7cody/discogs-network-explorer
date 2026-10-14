@@ -31,7 +31,7 @@ client_secret*.json
 # Outputs
 dne_outputs/
 
-# Project notes / session files (not part of the app)
+# Local notes (not part of the app)
 changes.txt
 session_notes.md
 lost_updates.txt

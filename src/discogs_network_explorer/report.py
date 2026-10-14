@@ -46,6 +46,7 @@ def generate_report_html(
         HTML string.
     """
     import base64
+    from html import escape
 
     buf = io.BytesIO()
     graph_fig.savefig(buf, format="png", bbox_inches="tight")
@@ -77,11 +78,11 @@ def generate_report_html(
   <p>Generated: {timestamp}</p>
 
   <h2>Inputs</h2>
-  <pre>Seed Labels:  {seed_label_ids}
-Seed Artists: {seed_artist_ids}</pre>
+  <pre>Seed Labels:  {escape(str(seed_label_ids))}
+Seed Artists: {escape(str(seed_artist_ids))}</pre>
 
   <h2>Master Artist Pools</h2>
-  <pre>{master_artist_pools}</pre>
+  <pre>{escape(str(master_artist_pools))}</pre>
 
   <h2>Results — first 50 rows</h2>
   {df_results.head(50).to_html(index=False, border=0)}
@@ -90,7 +91,7 @@ Seed Artists: {seed_artist_ids}</pre>
   <img src="data:image/png;base64,{graph_b64}" alt="Network graph" />
 
   <h2>Run Metadata</h2>
-  <pre>{metadata}</pre>
+  <pre>{escape(str(metadata))}</pre>
 
 </body>
 </html>"""

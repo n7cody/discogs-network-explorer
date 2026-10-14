@@ -16,6 +16,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
+from .sanitize import write_private
+
 # YouTube API scope — manage playlists and read-only search.
 _SCOPES = ["https://www.googleapis.com/auth/youtube"]
 
@@ -28,10 +30,6 @@ _TOKEN_PATH = _CONFIG_DIR / "youtube_token.json"
 #   playlists.insert = 50 units
 #   playlistItems.insert = 50 units
 # Daily quota = 10,000 units → ~90 searches + 1 playlist + 90 adds per day.
-
-
-def _ensure_config_dir() -> None:
-    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def get_stored_token_path() -> Path:
@@ -70,7 +68,10 @@ def load_credentials() -> Credentials | None:
     if not _TOKEN_PATH.exists():
         return None
 
-    creds = Credentials.from_authorized_user_file(str(_TOKEN_PATH), _SCOPES)
+    try:
+        creds = Credentials.from_authorized_user_file(str(_TOKEN_PATH), _SCOPES)
+    except (ValueError, OSError):
+        return None
 
     if creds.expired and creds.refresh_token:
         from google.auth.transport.requests import Request
@@ -88,8 +89,7 @@ def load_credentials() -> Credentials | None:
 
 
 def _save_token(creds: Credentials) -> None:
-    _ensure_config_dir()
-    _TOKEN_PATH.write_text(creds.to_json())
+    write_private(_TOKEN_PATH, creds.to_json())
 
 
 def clear_credentials() -> None:

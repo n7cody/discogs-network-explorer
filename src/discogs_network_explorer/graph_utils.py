@@ -55,9 +55,7 @@ def _year_to_color(year: int | None) -> str:
     return _DEFAULT_YEAR_COLOR
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # GRAPH CONSTRUCTORS
-# ─────────────────────────────────────────────────────────────────────────────
 
 def build_label_label_graph(
     label_to_artists: dict[str, set[str]],
@@ -186,9 +184,7 @@ def build_artist_label_graph(
     return G
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # RENDERING
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _halo_multiplier(releases: int, n_artists: int) -> float:
     """Halo size multiplier based on releases-per-artist ratio."""
@@ -327,8 +323,9 @@ def draw_graph_matplotlib(G: nx.Graph, ax: plt.Axes | None = None) -> None:
     # Text labels: seed labels bold in gold, everything else normal.
     n_nodes = G.number_of_nodes()
     font_size = 7 if n_nodes <= 60 else 5 if n_nodes <= 120 else 4
+    # Escape "$" so Discogs names are not parsed as matplotlib mathtext
     display_labels = {
-        n: d.get("display") or n.split(":", 1)[-1]
+        n: str(d.get("display") or n.split(":", 1)[-1]).replace("$", r"\$")
         for n, d in G.nodes(data=True)
     }
 

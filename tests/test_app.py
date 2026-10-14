@@ -1,4 +1,6 @@
+import io
 import shutil
+import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -29,7 +31,7 @@ def test_without_database_app_uses_api_and_asks_for_token(env):
     at = AppTest.from_file(APP, default_timeout=30).run()
     assert not at.exception
     assert len(at.sidebar.radio) == 0
-    assert any("dne-update" in c.value for c in at.sidebar.caption)
+    assert any("dne-db-update" in c.value for c in at.sidebar.caption)
     assert any("access token" in w.value for w in at.warning)
 
 
@@ -64,3 +66,220 @@ def test_format_filter_matches_any_listed_format():
     assert filter_by_format(df, {"CD"})["format"].tolist() == ["CD, Vinyl", "cd"]
     assert filter_by_format(df, {"vinyl", "File"})["format"].tolist() == ["CD, Vinyl", "Vinyl", "File"]
     assert filter_by_format(df, set()) is df
+
+
+# Helpers
+
+def _by_label(widgets, label):
+    return next(w for w in widgets if w.label == label)
+
+
+def _labels(widgets):
+    return [w.label for w in widgets]
+
+
+_media: list = []
+
+
+@pytest.fixture(autouse=True)
+def media(monkeypatch):
+    """Keep AppTest's in-memory media store so download button data can be read."""
+    from streamlit.runtime.memory_media_file_storage import MemoryMediaFileStorage
+    from streamlit.testing.v1 import app_test
+
+    class Kept(MemoryMediaFileStorage):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            _media.append(self)
+
+    monkeypatch.setattr(app_test, "MemoryMediaFileStorage", Kept)
+
+
+def _zip_csvs(at, label="Download results (CSV)"):
+    """The CSV files inside a download button's ZIP, as DataFrames by file name."""
+    url = next(d.proto.url for d in at.get("download_button") if d.proto.label == label)
+    data = _media[-1].get_file(url.rsplit("/", 1)[1]).content
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        return {n: pd.read_csv(zf.open(n), dtype={"label_id": str}) for n in zf.namelist() if n.endswith(".csv")}
+
+
+@pytest.fixture
+def local_app(env, snapshot):
+    shutil.copy(snapshot, env / "discogs_20261001.duckdb")
+    return AppTest.from_file(APP, default_timeout=30).run()
+
+
+def _run(at, seeds, **checks):
+    at.sidebar.text_area[0].set_value(seeds)
+    at.sidebar.slider[0].set_value((1900, at.sidebar.slider[0].max))
+    for label, value in checks.items():
+        _by_label(at.sidebar.checkbox, label).set_value(value)
+    return _by_label(at.sidebar.button, "Run Analysis").click().run()
+
+
+@pytest.fixture
+def api_app(env, monkeypatch):
+    monkeypatch.setenv("DISCOGS_TOKEN", "test-token")
+    return AppTest.from_file(APP, default_timeout=30).run()
+
+
+# Original Releases only
+
+ORIGINALS = "Original Releases only"
+
+
+def test_originals_toggle_shown_off_in_local_mode(local_app):
+    assert _by_label(local_app.sidebar.checkbox, ORIGINALS).value is False
+
+
+def test_originals_toggle_hidden_in_api_mode(api_app):
+    assert not api_app.exception
+    assert ORIGINALS not in _labels(api_app.sidebar.checkbox)
+
+
+def test_originals_toggle_limits_seed_pool(local_app):
+    # Label 836's only release is a non-main version of its master
+    at = _run(local_app, "836", **{ORIGINALS: True})
+    assert not at.exception
+    assert any("No artists" in e.value for e in at.error)
+
+    at = _run(at, "836", **{ORIGINALS: False})
+    assert not at.exception
+    assert at.session_state["originals_used"] is False
+    assert len(at.session_state["df_raw"]) == 4
+
+
+# Label Concentration
+
+MIN_CONC = "Min label concentration (%)"
+
+
+def test_concentration_column_in_discovered_labels(local_app):
+    at = _run(local_app, "99137")
+    assert not at.exception
+    labels = _zip_csvs(at)["discovered_labels.csv"].set_index("label_id")
+    # 99137: all 22 of its artists are in the pool; 14057: 2 of its 4
+    assert labels.loc["99137", "concentration_pct"] == 100.0
+    assert labels.loc["14057", "concentration_pct"] == 50.0
+
+
+def test_concentration_filter_off_by_default_and_drops_labels_below(local_app):
+    at = _run(local_app, "99137")
+    assert _by_label(at.sidebar.number_input, MIN_CONC).value == 0
+    assert "14057" in set(at.session_state["df_raw"]["label_id"])
+    shown = lambda: set(at.dataframe[1].value["label_id"].astype(str))
+    assert "14057" in shown()
+
+    _by_label(at.sidebar.number_input, MIN_CONC).set_value(60.0).run()
+    assert not at.exception
+    assert "14057" not in shown()
+    assert "99137" in shown()
+
+
+# Catalog-size cap
+
+CAP_ON = "Cap catalog size"
+CAP = "Max catalog size (releases)"
+
+
+def test_catalog_cap_off_by_default(local_app):
+    at = _run(local_app, "99137")
+    assert _by_label(at.sidebar.checkbox, CAP_ON).value is False
+    assert CAP not in _labels(at.sidebar.number_input)
+    assert "excluded_labels.csv" not in _zip_csvs(at)
+    assert not any(e.label.startswith("Excluded labels") for e in at.expander)
+
+
+def test_catalog_cap_excludes_large_labels_and_records_them(local_app):
+    at = _run(local_app, "99137")
+    _by_label(at.sidebar.checkbox, CAP_ON).check().run()
+    assert _by_label(at.sidebar.number_input, CAP).value == 400
+    # 14057 has 3 releases; seed label 99137 (9 releases) is never excluded
+    _by_label(at.sidebar.number_input, CAP).set_value(2).run()
+    assert not at.exception
+    assert "14057" not in set(at.dataframe[1].value["label_id"].astype(str))
+    assert any(e.label.startswith("Excluded labels") for e in at.expander)
+    for zip_label in ("Download results (CSV)", "Download report (ZIP)"):
+        excluded = _zip_csvs(at, zip_label)["excluded_labels.csv"].set_index("label_id")
+        assert list(excluded.columns) == ["label_name", "catalog_size", "n_pool_artists"]
+        assert excluded.loc["14057"].tolist() == ["Yerba Buena Discos", 3, 2]
+        assert "99137" not in excluded.index
+
+
+# Release Activity Window over each artist's full history
+
+def test_artist_activity_uses_full_history_in_local_mode(local_app):
+    at = local_app
+    at.sidebar.selectbox[0].set_value("Artists Only").run()
+    at.sidebar.text_area[1].set_value("712683,3225")
+    _by_label(at.sidebar.number_input, "Min shared artists from input list").set_value(1)
+    _by_label(at.sidebar.checkbox, "Release Activity Window").check()
+    at = _run(at, "")
+    _by_label(at.sidebar.slider, "Activity window year range").set_value((2007, 2008))
+    _by_label(at.sidebar.slider, "Min releases within activity window").set_value(3)
+    # The Results Window keeps only 712683's two 2008 releases; its full history has three
+    _by_label(at.sidebar.number_input, "Year from").set_value(2008).run()
+    assert not at.exception
+    assert set(at.dataframe[0].value["artist_id"].astype(str)) == {"712683"}
+
+
+# Search parameters recorded in the export
+
+def _params(at):
+    info = _zip_csvs(at)["input_info.csv"]
+    info = info[info["section"] == "Search Parameters"]
+    return dict(zip(info["field"], info["value"].astype(str)))
+
+
+def test_export_records_local_settings(local_app):
+    at = _run(local_app, "99137", **{ORIGINALS: False})
+    params = _params(at)
+    assert params["release_caps"] == "no caps"
+    assert params["originals_only"] == "False"
+    assert params["min_label_concentration_pct"] == "off"
+    assert params["catalog_size_cap"] == "off"
+    assert "max_releases_per_artist" not in params
+
+    _by_label(at.sidebar.number_input, MIN_CONC).set_value(5.0).run()
+    _by_label(at.sidebar.checkbox, CAP_ON).check().run()
+    params = _params(at)
+    assert params["min_label_concentration_pct"] == "5.0"
+    assert params["catalog_size_cap"] == "400"
+
+
+# API mode keeps its own controls
+
+@pytest.fixture
+def stub_api(monkeypatch, snapshot):
+    """The API backend answering from the fixture database, without HTTP."""
+    from discogs_network_explorer import backend
+
+    local_db.use_snapshot(snapshot)
+    rows = [{**{k: v for k, v in r.items() if k not in ("format_names", "format_descriptions")},
+             "format": r["format_names"]}
+            for r in local_db.get_master_label_rows(local_db.get_master_artist_list(["99137"]))]
+    for name, fn in {
+        "get_master_artist_list": lambda *a, **kw: local_db.get_master_artist_list(["99137"]),
+        "get_master_label_rows": lambda *a, **kw: rows,
+        "get_label_earliest_year": local_db.get_label_earliest_year,
+        "get_label_latest_year": local_db.get_label_latest_year,
+        "get_label_release_count": local_db.get_label_release_count,
+        "get_label_name": local_db.get_label_name,
+        "get_artist_name": local_db.get_artist_name,
+    }.items():
+        monkeypatch.setattr(backend, name, fn)
+
+
+def test_api_mode_shows_no_local_only_controls(api_app, stub_api):
+    at = _run(api_app, "99137")
+    assert not at.exception
+    assert at.session_state["source_used"] == "api"
+    assert MIN_CONC not in _labels(at.sidebar.number_input)
+    assert CAP_ON not in _labels(at.sidebar.checkbox)
+    assert "concentration_pct" not in at.dataframe[1].value.columns
+    csvs = _zip_csvs(at)
+    assert "concentration_pct" not in csvs["discovered_labels.csv"].columns
+    assert "excluded_labels.csv" not in csvs
+    params = _params(at)
+    assert params["max_releases_per_artist"] == "40"
+    assert "release_caps" not in params

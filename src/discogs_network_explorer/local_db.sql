@@ -96,7 +96,7 @@ ORDER BY p.artist_id, p.release_id, rl.label_id;
 
 -- name: label_stats
 -- Catalog size, active years and roster size for each requested label (labels without releases are absent).
--- A few labels appear on releases but not in the labels Dump; their name comes from the releases.
+-- A few labels appear on releases but not in the labels file; their name comes from the releases.
 -- $label_ids BIGINT[]
 WITH requested_labels AS (
     SELECT DISTINCT unnest($label_ids) AS label_id
@@ -132,6 +132,21 @@ SELECT CAST(s.artist_id AS VARCHAR) AS artist_id,
 FROM requested_artists
 JOIN artist_stats s USING (artist_id)
 ORDER BY s.artist_id;
+
+-- name: artist_window_counts
+-- Each requested artist's releases (any year in the window, full history).
+-- $artist_ids BIGINT[], $min_year INTEGER, $max_year INTEGER
+WITH requested_artists AS (
+    SELECT DISTINCT unnest($artist_ids) AS artist_id
+)
+SELECT CAST(arr.artist_id AS VARCHAR) AS artist_id,
+       count(DISTINCT arr.release_id) AS n_releases
+FROM requested_artists
+JOIN artist_release_roles arr USING (artist_id)
+JOIN releases r USING (release_id)
+WHERE r.year BETWEEN $min_year AND $max_year
+GROUP BY arr.artist_id
+ORDER BY arr.artist_id;
 
 -- name: label_name
 -- $label_id BIGINT
@@ -222,7 +237,7 @@ main_artist_names AS (
     GROUP BY release_id
 ),
 track_artist_names AS (
-    -- track_artists has no seq column; rowid (DuckDB's row number) keeps the Dump's order
+    -- track_artists has no seq column; rowid (DuckDB's row number) keeps the source file's order
     SELECT release_id,
            track_seq,
            string_agg(artist_name, ', ' ORDER BY rowid) AS credited_names

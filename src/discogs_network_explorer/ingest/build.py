@@ -28,7 +28,7 @@ LOAD_ORDER = {
 }
 
 
-def build_snapshot(staging: Path, db_path: Path, dump_date: str, checksums: dict[str, str],
+def build_snapshot(staging: Path, db_path: Path, db_date: str, checksums: dict[str, str],
                    timings: dict[str, float], release_limit: int | None = None,
                    memory_limit: str | None = None) -> dict[str, int]:
     """Create `db_path` from `<staging>/<table>.parquet`; return row counts per table."""
@@ -56,10 +56,10 @@ def build_snapshot(staging: Path, db_path: Path, dump_date: str, checksums: dict
                   for t in (*SCHEMAS, *DERIVED_TABLES)}
         con.execute("""
             CREATE TABLE snapshot_meta (
-                dump_date VARCHAR, built_at TIMESTAMPTZ, checksums JSON, row_counts JSON,
+                db_date VARCHAR, built_at TIMESTAMPTZ, checksums JSON, row_counts JSON,
                 timings JSON, release_limit INTEGER, schema_version INTEGER)""")
         con.execute("INSERT INTO snapshot_meta VALUES (?, ?, ?, ?, ?, ?, ?)", [
-            dump_date, datetime.now(timezone.utc), json.dumps(checksums), json.dumps(counts),
+            db_date, datetime.now(timezone.utc), json.dumps(checksums), json.dumps(counts),
             json.dumps(timings), release_limit, SCHEMA_VERSION])
         con.execute("CHECKPOINT")
     finally:
@@ -84,6 +84,8 @@ def read_meta(db_path: Path) -> dict | None:
     finally:
         con.close()
     meta = dict(zip(cols, row))
+    if "dump_date" in meta:  # databases built before the column rename
+        meta["db_date"] = meta.pop("dump_date")
     for k in ("checksums", "row_counts", "timings"):
         meta[k] = json.loads(meta[k])
     return meta

@@ -1,4 +1,4 @@
-"""Stream Dump XML into Parquet files, one per table."""
+"""Stream Discogs XML into Parquet files, one per table."""
 
 from __future__ import annotations
 
@@ -163,15 +163,15 @@ def iter_records(stream: BinaryIO, tag: str) -> Iterator:
     parser.close()
 
 
-def parse_dump(kind: str, stream: BinaryIO, out_dir: Path, limit: int | None = None,
+def parse_xml(kind: str, stream: BinaryIO, out_dir: Path, limit: int | None = None,
                progress: Callable[[int], None] | None = None) -> int:
-    """Parse one Dump file (decompressed XML stream) into `<out_dir>/<table>.parquet`.
+    """Parse one Discogs XML file (decompressed XML stream) into `<out_dir>/<table>.parquet`.
 
     Returns the number of records parsed. `progress` is called with the running
     count after every batch.
     """
     if kind not in HANDLERS:
-        raise ValueError(f"unknown dump kind: {kind}")
+        raise ValueError(f"unknown file kind: {kind}")
     out_dir.mkdir(parents=True, exist_ok=True)
     tables = TABLES_BY_KIND[kind]
     handle = HANDLERS[kind]

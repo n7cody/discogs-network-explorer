@@ -10,8 +10,8 @@ from discogs_network_explorer.ingest.update import UpdateError, default_db_dir, 
 
 
 @pytest.fixture
-def source(dump_server):
-    return HttpSource(dump_server)
+def source(download_server):
+    return HttpSource(download_server)
 
 
 def test_full_update_builds_and_cleans_up(tmp_path, source):
@@ -19,7 +19,7 @@ def test_full_update_builds_and_cleans_up(tmp_path, source):
     assert path == tmp_path / "discogs_20261001.duckdb"
     assert live_snapshot(tmp_path) == path
     meta = read_meta(path)
-    assert meta["dump_date"] == "20261001"
+    assert meta["db_date"] == "20261001"
     assert meta["release_limit"] is None
     assert set(meta["checksums"]) == {f"discogs_20261001_{k}.xml.gz"
                                       for k in ("labels", "artists", "masters", "releases")}
@@ -73,7 +73,7 @@ def test_full_run_replaces_limited_snapshot_of_same_date(tmp_path, source):
 def _fake_previous(tmp_path, counts):
     prev = tmp_path / "discogs_20260901.duckdb"
     con = duckdb.connect(str(prev))
-    con.execute("CREATE TABLE snapshot_meta AS SELECT '20260901' AS dump_date, now() AS built_at, "
+    con.execute("CREATE TABLE snapshot_meta AS SELECT '20260901' AS db_date, now() AS built_at, "
                 "'{}'::JSON AS checksums, ?::JSON AS row_counts, '{}'::JSON AS timings, "
                 "NULL::INTEGER AS release_limit, 1 AS schema_version", [json.dumps(counts)])
     con.close()
@@ -103,10 +103,10 @@ def test_default_db_dir(monkeypatch, tmp_path):
     assert default_db_dir().parts[-2:] == (".dne", "discogs_db")
 
 
-def test_cli(tmp_path, dump_server, monkeypatch):
-    monkeypatch.setattr(cli, "BASE_URL", dump_server)
-    assert cli.main(["--db-path", str(tmp_path), "--dump", "20261001", "--limit", "5"]) == 0
+def test_cli(tmp_path, download_server, monkeypatch):
+    monkeypatch.setattr(cli, "BASE_URL", download_server)
+    assert cli.main(["--db-path", str(tmp_path), "--date", "20261001", "--limit", "5"]) == 0
     assert read_meta(live_snapshot(tmp_path))["release_limit"] == 5
-    assert cli.main(["--db-path", str(tmp_path), "--dump", "20261001", "--limit", "5"]) == 0
-    assert cli.main(["--db-path", str(tmp_path), "--dump", "20261001"]) == 0
-    assert cli.main(["--db-path", str(tmp_path), "--dump", "20261001", "--limit", "5"]) == 1
+    assert cli.main(["--db-path", str(tmp_path), "--date", "20261001", "--limit", "5"]) == 0
+    assert cli.main(["--db-path", str(tmp_path), "--date", "20261001"]) == 0
+    assert cli.main(["--db-path", str(tmp_path), "--date", "20261001", "--limit", "5"]) == 1

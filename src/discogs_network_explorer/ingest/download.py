@@ -1,4 +1,4 @@
-"""Find, download and verify Discogs Dump files from data.discogs.com."""
+"""Find, download and verify Discogs database files from data.discogs.com."""
 
 from __future__ import annotations
 
@@ -28,8 +28,8 @@ class ChecksumError(RuntimeError):
     pass
 
 
-def dump_filename(dump_date: str, kind: str) -> str:
-    return f"discogs_{dump_date}_{kind}.txt" if kind == "CHECKSUM" else f"discogs_{dump_date}_{kind}.xml.gz"
+def dated_filename(db_date: str, kind: str) -> str:
+    return f"discogs_{db_date}_{kind}.txt" if kind == "CHECKSUM" else f"discogs_{db_date}_{kind}.xml.gz"
 
 
 def file_url(base_url: str, filename: str) -> str:
@@ -38,7 +38,7 @@ def file_url(base_url: str, filename: str) -> str:
 
 
 def parse_listing(html: str) -> dict[str, set[str]]:
-    """Map each dump date in a listing page to the file kinds present."""
+    """Map each database date in a listing page to the file kinds present."""
     found: dict[str, set[str]] = {}
     for href in re.findall(r'href="([^"]+)"', html):
         m = _FILE_RE.search(unquote(href))
@@ -48,7 +48,7 @@ def parse_listing(html: str) -> dict[str, set[str]]:
 
 
 def complete_dates(listing: dict[str, set[str]]) -> list[str]:
-    """Dump dates that have all four kinds and a checksum file, oldest first."""
+    """Database dates that have all four kinds and a checksum file, oldest first."""
     need = {*KINDS, "CHECKSUM"}
     return sorted(d for d, kinds in listing.items() if need <= kinds)
 
@@ -72,7 +72,7 @@ def sha256_file(path: Path) -> str:
 
 
 class HttpSource:
-    """Dump files served by data.discogs.com (or a stand-in at `base_url`)."""
+    """Database files served by data.discogs.com (or a stand-in at `base_url`)."""
 
     def __init__(self, base_url: str = BASE_URL, today: date | None = None, retries: int = 3,
                  session: requests.Session | None = None):
@@ -87,16 +87,16 @@ class HttpSource:
         return r
 
     def latest_date(self) -> str:
-        """Newest complete dump, looking at this year's listing then last year's."""
+        """Newest complete database version, looking at this year's listing then last year's."""
         for year in (self.today.year, self.today.year - 1):
             url = f"{self.base_url}?prefix={quote(f'data/{year}/', safe='')}"
             dates = complete_dates(parse_listing(self._get(url).text))
             if dates:
                 return dates[-1]
-        raise RuntimeError("no complete Discogs dump found")
+        raise RuntimeError("no complete Discogs database version found")
 
-    def checksums(self, dump_date: str) -> dict[str, str]:
-        return parse_checksums(self._get(file_url(self.base_url, dump_filename(dump_date, "CHECKSUM"))).text)
+    def checksums(self, db_date: str) -> dict[str, str]:
+        return parse_checksums(self._get(file_url(self.base_url, dated_filename(db_date, "CHECKSUM"))).text)
 
     def download(self, filename: str, dest: Path, sha256: str) -> None:
         """Download to `dest`, verifying sha256. Restarts from zero on failure (no Range support)."""

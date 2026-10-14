@@ -70,7 +70,7 @@ def test_artist_stats(con):
 
 def test_snapshot_meta(snapshot):
     meta = read_meta(snapshot)
-    assert meta["dump_date"] == "20261001"
+    assert meta["db_date"] == "20261001"
     assert meta["row_counts"]["releases"] == 43
     assert meta["row_counts"]["artist_release_roles"] == 155
     assert meta["checksums"] == {"x": "y"}

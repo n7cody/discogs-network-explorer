@@ -130,7 +130,7 @@ def test_label_stats():
 
 
 def test_label_missing_from_labels_table_named_from_releases(snapshot, tmp_path):
-    # 155 labels in the 20261001 database appear on releases but not in the labels Dump
+    # 155 labels in the 20261001 database appear on releases but not in the labels file
     copy = tmp_path / "snap.duckdb"
     shutil.copy(snapshot, copy)
     with duckdb.connect(str(copy)) as con:
@@ -167,6 +167,14 @@ def test_artist_stats():
         {"artist_id": "3225", "earliest_year": 2002, "latest_year": 2002, "n_releases": 4},
         {"artist_id": "712683", "earliest_year": 2004, "latest_year": 2008, "n_releases": 4},
     ]
+
+
+def test_artist_window_counts():
+    # 712683 has releases in 2004, 2007 and 2008 (two); 3225 has four in 2002
+    assert local_db.get_artist_window_counts(["712683", "3225", "999999999"], 2007, 2008) == {
+        "712683": 3}
+    assert local_db.get_artist_window_counts(["712683", "3225"], 2000, 2004) == {
+        "3225": 4, "712683": 1}
 
 
 def test_artist_name():
@@ -263,7 +271,7 @@ def test_swapped_snapshot_is_picked_up(snapshot, tmp_path, monkeypatch):
     local_db.use_snapshot(None)
     try:
         assert local_db.get_label_name(SEED) == "Smoke City Music"
-        # what dne-update does: build the next database, then delete the old one
+        # what dne-db-update does: build the next database, then delete the old one
         new = tmp_path / "discogs_20261101.duckdb"
         shutil.copy(snapshot, new)
         with duckdb.connect(str(new)) as con:
@@ -287,7 +295,7 @@ def test_snapshot_meta_readable_while_connected(snapshot):
     from discogs_network_explorer.ingest.build import read_meta
 
     local_db.get_label_name(SEED)
-    assert read_meta(snapshot)["dump_date"] == "20261001"
+    assert read_meta(snapshot)["db_date"] == "20261001"
 
 
 def test_missing_snapshot(tmp_path, monkeypatch, snapshot):

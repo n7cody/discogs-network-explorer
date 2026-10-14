@@ -47,9 +47,9 @@ def newest_release_id(db: Path) -> int:
         return con.execute("SELECT max(release_id) FROM releases").fetchone()[0]
 
 
-def classify(api: set[int], snap: set[int] | None, newer_than_dump: bool = False) -> str:
+def classify(api: set[int], snap: set[int] | None, newer_than_db: bool = False) -> str:
     if snap is None:
-        return "release added after the Dump" if newer_than_dump else "release missing from local database"
+        return "release added after the database date" if newer_than_db else "release missing from local database"
     if api == snap:
         return "match"
     if api < snap:

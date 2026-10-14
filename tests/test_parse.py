@@ -3,7 +3,7 @@ import io
 import pyarrow.parquet as pq
 import pytest
 
-from discogs_network_explorer.ingest.parse import parse_dump
+from discogs_network_explorer.ingest.parse import parse_xml
 
 
 def rows(staging, table, **where):
@@ -82,25 +82,25 @@ def test_masterless_release_has_null_master():
     from pathlib import Path
 
     with tempfile.TemporaryDirectory() as d:
-        parse_dump("releases", io.BytesIO(xml), Path(d))
+        parse_xml("releases", io.BytesIO(xml), Path(d))
         (r,) = pq.read_table(Path(d) / "releases.parquet").to_pylist()
     assert r["master_id"] is None
     assert r["is_main_release"] is None
     assert r["year"] is None
 
 
-def test_limit_stops_early(tmp_path, dump_dir):
+def test_limit_stops_early(tmp_path, source_dir):
     import gzip
 
-    with gzip.open(dump_dir / "discogs_20261001_releases.xml.gz", "rb") as f:
-        n = parse_dump("releases", f, tmp_path, limit=5)
+    with gzip.open(source_dir / "discogs_20261001_releases.xml.gz", "rb") as f:
+        n = parse_xml("releases", f, tmp_path, limit=5)
     assert n == 5
     assert pq.read_table(tmp_path / "releases.parquet").num_rows == 5
 
 
 def test_unknown_kind_rejected(tmp_path):
     with pytest.raises(ValueError):
-        parse_dump("tracks", io.BytesIO(b"<x/>"), tmp_path)
+        parse_xml("tracks", io.BytesIO(b"<x/>"), tmp_path)
 
 
 def test_out_of_range_numbers_become_null(tmp_path):
@@ -109,7 +109,7 @@ def test_out_of_range_numbers_become_null(tmp_path):
     <labels><label name="L" catno="1" id="99999999999999999999"/></labels>
     <videos><video src="https://www.youtube.com/watch?v=x" duration="4294967296"><title>v</title></video></videos>
     </release></releases>"""
-    parse_dump("releases", io.BytesIO(xml), tmp_path)
+    parse_xml("releases", io.BytesIO(xml), tmp_path)
     assert pq.read_table(tmp_path / "release_formats.parquet").to_pylist()[0]["qty"] is None
     assert pq.read_table(tmp_path / "release_labels.parquet").to_pylist()[0]["label_id"] is None
     assert pq.read_table(tmp_path / "release_videos.parquet").to_pylist()[0]["duration"] is None

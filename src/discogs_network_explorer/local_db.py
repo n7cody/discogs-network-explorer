@@ -69,8 +69,8 @@ def _cursor() -> duckdb.DuckDBPyConnection:
     global _con, _con_key
     path = snapshot_path()
     if path is None or not path.exists():
-        raise SnapshotMissing(f"No local database in {default_db_dir()}; run `dne-update`.")
-    # A new file (or one replaced in place by dne-update) has a new inode
+        raise SnapshotMissing(f"No local database in {default_db_dir()}; run `dne-db-update`.")
+    # A new file (or one replaced in place by dne-db-update) has a new inode
     key = (path, path.stat().st_ino)
     with _lock:
         if _con is None or _con_key != key:
@@ -158,6 +158,16 @@ def get_label_stats(label_ids: Iterable[str]) -> list[dict]:
 def get_artist_stats(artist_ids: Iterable[str]) -> list[dict]:
     """artist_id, earliest_year, latest_year, n_releases over each artist's full history."""
     return _rows("artist_stats", artist_ids=_ids(artist_ids))
+
+
+def get_artist_window_counts(artist_ids: Iterable[str], min_year: int, max_year: int) -> dict[str, int]:
+    """Releases per artist with a year in [min_year, max_year], over the full history.
+
+    Artists with none are left out.
+    """
+    rows = _rows("artist_window_counts", artist_ids=_ids(artist_ids), min_year=min_year,
+                 max_year=max_year)
+    return {r["artist_id"]: r["n_releases"] for r in rows}
 
 
 def _label_stat(label_id: str, key: str):

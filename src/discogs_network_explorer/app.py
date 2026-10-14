@@ -19,7 +19,7 @@ Sidebar layout:
   Data Source           — local database or Discogs API
   Authentication        — token input (API only)
   Settings              — HTTP cache toggle (API only)
-  Seed Configuration    — mode selector, seed label / artist IDs
+  Input Configuration   — mode selector, input label / artist IDs
   Discovery Caps        — year range, per-label / per-artist release caps,
                           min releases per label / artist,
                           optional Release Activity Window
@@ -47,6 +47,7 @@ import streamlit as st
 from dotenv import dotenv_values
 
 from discogs_network_explorer.backends import get_backend, snapshot_available
+from discogs_network_explorer.playlist import MAX_ITEMS as PLAYLIST_MAX_ITEMS, mix_catalogs
 from discogs_network_explorer.ingest.build import read_meta
 from discogs_network_explorer.filters import (
     apply_artists_only_mode,
@@ -129,37 +130,37 @@ st.sidebar.header("Data Source")
 _SOURCE_LABELS = {"snapshot": "Local database", "api": "Discogs API"}
 
 
-def _dump_label() -> str:
-    """The local database's dump date as YYYY-MM-DD, or "" when unreadable."""
+def _db_date_label() -> str:
+    """The local database's date as YYYY-MM-DD, or "" when unreadable."""
     meta = read_meta(get_backend("snapshot").snapshot_path() or Path())
-    d = str((meta or {}).get("dump_date") or "")
+    d = str((meta or {}).get("db_date") or "")
     return f"{d[:4]}-{d[4:6]}-{d[6:]}" if len(d) == 8 else d
 
 
 if snapshot_available():
-    _dump_date = _dump_label()
+    _db_date = _db_date_label()
     data_source = st.sidebar.radio(
         "Where results come from",
         options=["snapshot", "api"],
         format_func=_SOURCE_LABELS.get,
         captions=[
-            f"Instant, offline. Discogs data dump of {_dump_date or 'unknown date'}.",
+            f"Instant, offline. Discogs database of {_db_date or 'unknown date'}.",
             "Live and current, but slow (about one request per second).",
         ],
     )
 else:
-    _dump_date = ""
+    _db_date = ""
     data_source = "api"
     st.sidebar.markdown("**Discogs API**")
     st.sidebar.caption(
         "No local database found. To query an offline copy of Discogs instead, "
-        "run `dne-update` in a terminal. The first build takes about 80 minutes "
+        "run `dne-db-update` in a terminal. The first build takes about 80 minutes "
         "and needs up to 40 GB of free disk (about 10 GB once built)."
     )
 
 B = get_backend(data_source)
 _source_desc = (
-    f"local database (dump {_dump_date or 'unknown'})" if data_source == "snapshot"
+    f"local database (version {_db_date or 'unknown'})" if data_source == "snapshot"
     else "Discogs API"
 )
 
@@ -215,10 +216,10 @@ if data_source == "api":
 
 # SIDEBAR — SEED CONFIGURATION
 
-st.sidebar.header("Seed Configuration")
+st.sidebar.header("Input Configuration")
 
 seed_mode = st.sidebar.selectbox(
-    "Seed mode",
+    "Input mode",
     ["Labels Only", "Labels + Artists", "Artists Only"],
     help=(
         "Labels Only — crawl from label(s) and find related labels.\n"
@@ -227,10 +228,10 @@ seed_mode = st.sidebar.selectbox(
     ),
 )
 
-st.sidebar.subheader("Seed IDs")
+st.sidebar.subheader("Input IDs")
 
 seed_labels_raw = st.sidebar.text_area(
-    "Seed label IDs (comma or newline separated)",
+    "Input label IDs (comma or newline separated)",
     "3661094,1390196",
 )
 _seed_errors: list[str] = []
@@ -241,7 +242,7 @@ except ValueError as _exc:
     _seed_errors.append(str(_exc))
 
 seed_artists_raw = st.sidebar.text_area(
-    "Seed artist IDs (comma or newline separated)",
+    "Input artist IDs (comma or newline separated)",
     "",
     help="Required for 'Labels + Artists' and 'Artists Only' modes.",
 )
@@ -260,7 +261,7 @@ st.sidebar.caption(
     "Year range and release caps control what the API crawl fetches. "
     "Changes here require clicking **Run Analysis** again."
     if data_source == "api" else
-    "The year range sets which seed releases define the artist pool. "
+    "The year range sets which input label releases define the artist pool. "
     "Changes here require clicking **Run Analysis** again."
 )
 
@@ -270,19 +271,38 @@ st.sidebar.caption(
 # the more expensive release-detail API call is made.
 
 fetch_year_min, fetch_year_max = st.sidebar.slider(
-    "Release year range",
+    "Input release year range",
     min_value=1900,
     max_value=CURRENT_YEAR,
     value=(2016, CURRENT_YEAR),
     step=1,
-    help="Only releases within this year range are fetched. This affects "
-         "artist discovery — artists on seed labels who have releases "
-         "outside this range may not be discovered.",
+    help=(
+        "Only releases within this year range are fetched. This affects "
+        "artist discovery — artists on input labels who have releases "
+        "outside this range may not be discovered."
+        if data_source == "api" else
+        "Only input label releases within this year range build the artist pool. "
+        "Each pool artist's releases are then read for all years; narrow them "
+        "with Year from / Year to under Result Filters."
+    ),
 )
 
 # API-only caps; the local database reads every release at no cost.
 max_releases_per_label: int = 0
 max_releases_per_artist: int = 0
+
+# Local database only: the API backend has no version information.
+originals_only: bool = False
+_originals_kw: dict = {}
+if data_source == "snapshot":
+    originals_only = st.sidebar.checkbox(
+        "Original Releases only",
+        value=False,
+        help="Count only the original version of each release (the main release "
+             "of its master, or releases with no master). Reissues and other "
+             "versions are left out.",
+    )
+    _originals_kw = {"originals_only": originals_only}
 
 # Per-entity release caps
 # Hard limits on how many releases are fetched per seed label / artist.
@@ -346,7 +366,7 @@ st.sidebar.markdown("---")
 activity_window_on = st.sidebar.checkbox(
     "Release Activity Window",
     value=False,
-    help="Require that labels (and artists in artist-seed modes) have a "
+    help="Require that labels (and artists in artist-input modes) have a "
          "minimum number of releases within a specified year window.  "
          "Useful for excluding labels or artists that were active only "
          "outside your period of interest.",
@@ -411,19 +431,19 @@ if seed_mode == "Labels Only":
     st.sidebar.markdown("---")
     st.sidebar.subheader("Labels Only — overlap tuning")
     min_overlaps_required = st.sidebar.number_input(
-        "Min shared artists from seed union",
+        "Min shared artists from input union",
         min_value=1,
         max_value=50,
         value=2,
         step=1,
         help="A discovered label must share at least this many artists with "
-             "the combined pool of all seed labels.",
+             "the combined pool of all input labels.",
     )
     strict_per_label = st.sidebar.checkbox(
-        "Strict mode — require overlap with every seed label",
+        "Strict mode — require overlap with every input label",
         value=False,
         help="When enabled, a discovered label must share at least one artist "
-             "with each individual seed label (in addition to the union "
+             "with each individual input label (in addition to the union "
              "overlap threshold above).",
     )
 
@@ -452,27 +472,28 @@ def _validate_inputs() -> None:
             st.error(md_escape(_err))
         st.stop()
     if seed_mode in {"Labels Only", "Labels + Artists"} and not seed_label_ids:
-        st.error(f"Mode '{seed_mode}' requires at least one seed label ID.")
+        st.error(f"Mode '{seed_mode}' requires at least one input label ID.")
         st.stop()
     if seed_mode in {"Labels + Artists", "Artists Only"} and not seed_artist_ids:
-        st.error(f"Mode '{seed_mode}' requires at least one seed artist ID.")
+        st.error(f"Mode '{seed_mode}' requires at least one input artist ID.")
         st.stop()
 
 
 if run_btn:
     _validate_inputs()
     if data_source == "snapshot" and not snapshot_available():
-        st.error("The local database is no longer available. Run `dne-update` "
+        st.error("The local database is no longer available. Run `dne-db-update` "
                  "in a terminal, or choose Discogs API.")
         st.stop()
 
     # Step 1a: build the artist pool from seed labels (if applicable).
     if seed_mode in {"Labels Only", "Labels + Artists"}:
-        with st.spinner("Crawling seed labels for artists…"):
+        with st.spinner("Crawling input labels for artists…"):
             label_artists = B.get_master_artist_list(
                 seed_label_ids,
                 min_year=fetch_year_min,
                 max_year=fetch_year_max,
+                **_originals_kw,
             )
         if seed_mode == "Labels + Artists":
             artists: set[str] = set(label_artists) | {str(a) for a in seed_artist_ids}
@@ -483,8 +504,8 @@ if run_btn:
 
     if not artists:
         st.error(
-            "No artists discovered from your seeds. "
-            "Try widening the year range or checking your seed IDs."
+            "No artists discovered from your inputs. "
+            "Try widening the year range or checking your input IDs."
         )
         st.stop()
 
@@ -505,12 +526,13 @@ if run_btn:
             max_global_releases=(
                 max_releases_per_label if max_releases_per_label > 0 else None
             ),
+            **_originals_kw,
         )
 
     if not rows:
         st.error(
             "No release rows returned. "
-            "Try widening the year range or adjusting your seeds."
+            "Try widening the year range or adjusting your inputs."
         )
         st.stop()
 
@@ -536,13 +558,20 @@ if run_btn:
     all_label_ids = list(df_raw["label_id"].astype(str).unique())
     label_years_map: dict[str, dict[str, int | None]] = {}
     label_counts_map: dict[str, int] = {}
+    # Label Concentration: share of a label's artists (all years) that are pool artists.
+    label_conc_map: dict[str, float] = {}
     if data_source == "snapshot":
+        _pool_per_label = df_raw.groupby(df_raw["label_id"].astype(str))["artist_id"].nunique()
         for _stat in B.get_label_stats(all_label_ids + [str(s) for s in seed_label_ids]):
             label_years_map[_stat["label_id"]] = {
                 "earliest": _stat["earliest_year"],
                 "latest":   _stat["latest_year"],
             }
             label_counts_map[_stat["label_id"]] = _stat["catalog_size"] or 0
+            if _stat["n_artists"]:
+                label_conc_map[_stat["label_id"]] = (
+                    100 * int(_pool_per_label.get(_stat["label_id"], 0)) / _stat["n_artists"]
+                )
     else:
         progress = st.progress(0, text="Collecting label year data…")
         for idx, lid in enumerate(all_label_ids):
@@ -565,9 +594,12 @@ if run_btn:
     st.session_state["seed_mode_used"]      = seed_mode
     st.session_state["label_years"]         = label_years_map
     st.session_state["label_counts"]        = label_counts_map
+    st.session_state["label_concentration"] = label_conc_map
     st.session_state["source_used"]         = data_source
     st.session_state["source_desc_used"]    = _source_desc
     st.session_state["fetch_years_used"]    = (fetch_year_min, fetch_year_max)
+    st.session_state["originals_used"]      = originals_only
+    st.session_state["caps_used"]           = (max_releases_per_artist, max_releases_per_label)
 
     st.success(
         f"Crawl complete: {len(artists)} artists, "
@@ -580,7 +612,7 @@ if run_btn:
 
 if "df_raw" not in st.session_state:
     st.info(
-        "Configure your seeds and discovery caps in the sidebar, "
+        "Configure your inputs and discovery caps in the sidebar, "
         "then click **Run Analysis**."
     )
     st.stop()
@@ -595,7 +627,9 @@ _all_label_years: dict[str, dict[str, int | None]] = st.session_state.get(
 )
 _label_counts_cache: dict[str, int] = st.session_state.get("label_counts", {})
 # Lookups after the crawl use the source the crawl used.
-B_used = get_backend(st.session_state.get("source_used", "api"))
+_source_used: str = st.session_state.get("source_used", "api")
+B_used = get_backend(_source_used)
+_label_conc: dict[str, float] = st.session_state.get("label_concentration", {})
 _source_desc_used: str = st.session_state.get("source_desc_used", "Discogs API")
 _fetch_min_used, _fetch_max_used = st.session_state.get(
     "fetch_years_used", (1900, CURRENT_YEAR)
@@ -664,8 +698,12 @@ selected_countries: list[str] = st.sidebar.multiselect(
 _available_roles = sorted(r for r in df_raw["role"].dropna().unique() if str(r).strip())
 selected_roles: list[str] = st.sidebar.multiselect(
     "Artist role", options=_available_roles, default=[],
-    help="Leave empty to include all roles. "
-         "Common values: Main, Appearance, TrackAppearance.",
+    help="Leave empty to include all roles. " + (
+        "Main, Track (a track on a Various Artists release), Producer, Co-producer, "
+        "Remix, Unofficial."
+        if _source_used == "snapshot" else
+        "Common values: Main, Appearance, TrackAppearance."
+    ),
 )
 
 _genre_tokens: set[str] = set()
@@ -683,6 +721,32 @@ selected_styles: list[str] = st.sidebar.multiselect(
     "Style", options=sorted(_style_tokens), default=[],
     help="Leave empty to include all styles.",
 )
+
+# Label Concentration needs each label's full artist count, known only locally.
+min_concentration: float = 0.0
+if _source_used == "snapshot":
+    min_concentration = st.sidebar.number_input(
+        "Min label concentration (%)",
+        min_value=0.0, max_value=100.0, value=0.0, step=0.5,
+        help="Share of a label's artists (all years) that are in your artist pool. "
+             "Large labels that host many unrelated artists score low, often under 2%. "
+             "0 = no minimum.",
+    )
+
+catalog_cap_on: bool = False
+max_catalog_size: int = 400
+if _source_used == "snapshot":
+    catalog_cap_on = st.sidebar.checkbox(
+        "Cap catalog size",
+        value=False,
+        help="Leave out discovered labels whose full catalog is larger than a set "
+             "number of releases. Excluded labels are listed below the results.",
+    )
+    if catalog_cap_on:
+        max_catalog_size = st.sidebar.number_input(
+            "Max catalog size (releases)", min_value=1, max_value=1_000_000,
+            value=400, step=50,
+        )
 
 # Graph options.
 st.sidebar.markdown("---")
@@ -734,6 +798,15 @@ if selected_genres:
     df = filter_by_genres(df, set(selected_genres))
 if selected_styles:
     df = filter_by_styles(df, set(selected_styles))
+if min_concentration > 0 and not df.empty:
+    _seed_set = {str(s) for s in _seed_labels_used}
+    _low_conc = {
+        lid for lid in df["label_id"].astype(str).unique()
+        if lid not in _seed_set and _label_conc.get(lid, 100.0) < min_concentration
+    }
+    if _low_conc:
+        df = df[~df["label_id"].astype(str).isin(_low_conc)].copy()
+
 
 # Mode-specific overlap filter — run BEFORE activity window so that
 # relevant labels aren't prematurely dropped.  The activity window
@@ -758,6 +831,28 @@ elif _seed_mode_used == "Artists Only":
         seed_artist_ids=_seed_artists_used,
         min_overlaps_required=artist_min_overlaps,
     )
+
+# Catalog-size cap: excluded labels are kept for the expander and excluded_labels.csv.
+_excluded_labels: pd.DataFrame | None = None
+if catalog_cap_on:
+    _seed_set = {str(s) for s in _seed_labels_used}
+    _df_lids = df["label_id"].astype(str)
+    _too_big = sorted(
+        (lid for lid in _df_lids.unique()
+         if lid not in _seed_set and _label_counts_cache.get(lid, 0) > max_catalog_size),
+        key=lambda lid: -_label_counts_cache.get(lid, 0),
+    )
+    _raw_lids = df_raw["label_id"].astype(str)
+    _pool_on_label = df_raw.groupby(_raw_lids)["artist_id"].nunique()
+    _names_on_label = df_raw.groupby(_raw_lids)["label_name"].first()
+    _excluded_labels = pd.DataFrame(
+        [{"label_id": lid, "label_name": _names_on_label.get(lid, lid),
+          "catalog_size": _label_counts_cache.get(lid, 0),
+          "n_pool_artists": int(_pool_on_label.get(lid, 0))} for lid in _too_big],
+        columns=["label_id", "label_name", "catalog_size", "n_pool_artists"],
+    )
+    if _too_big:
+        df = df[~_df_lids.isin(set(_too_big))].copy()
 
 # Release Activity Window — applied after the overlap filter.
 # Uses year data collected during Phase 1 (stored in session state) so
@@ -798,7 +893,14 @@ if activity_window_on and not df.empty:
             df = df[~df["label_id"].astype(str).isin(too_new_labels)].copy()
 
     # Apply the same window to artists when seeds include explicit artist IDs.
-    if _seed_mode_used in {"Artists Only", "Labels + Artists"}:
+    # The local database counts each artist's full history, not only the rows kept.
+    if _seed_mode_used in {"Artists Only", "Labels + Artists"} and _source_used == "snapshot":
+        _window_counts = B_used.get_artist_window_counts(
+            df["artist_id"].astype(str).unique(), activity_window_start, activity_window_end,
+        )
+        _active = {a for a, n in _window_counts.items() if n >= activity_min_releases}
+        df = df[df["artist_id"].astype(str).isin(_active)].copy()
+    elif _seed_mode_used in {"Artists Only", "Labels + Artists"}:
         df = filter_artists_by_activity_window(
             df,
             window_start=activity_window_start,
@@ -853,11 +955,12 @@ def _build_csv_outputs(
     label_names: dict[str, str],
     params: dict,
     label_years: dict[str, dict[str, int | None]] | None = None,
+    label_concentration: dict[str, float] | None = None,
 ) -> dict[str, str]:
     """
     Build 3 CSV outputs and return as {filename: csv_string}.
 
-    seed_info.csv         — seed labels, search parameters, discovered artists.
+    input_info.csv        — input labels, search parameters, discovered artists.
     all_releases.csv      — every crawled release row with resolved artist names.
     discovered_labels.csv — one row per label with artist overlap, year data,
                             and per-seed-label artist breakdown columns.
@@ -870,14 +973,14 @@ def _build_csv_outputs(
     info_rows: list[dict] = []
     for lid in seed_label_ids_used:
         info_rows.append({
-            "section": "Seed Labels",
+            "section": "Input Labels",
             "field": "label",
             "id": lid,
             "value": label_names.get(lid, lid),
         })
     for aid in seed_artist_ids_used:
         info_rows.append({
-            "section": "Seed Artists",
+            "section": "Input Artists",
             "field": "artist",
             "id": aid,
             "value": artist_name_map.get(aid, f"artist_{aid}"),
@@ -890,7 +993,7 @@ def _build_csv_outputs(
             "value": str(v),
         })
     _artist_section = (
-        "Input Artists" if seed_mode_used == "Artists Only" else "Discovered Artists"
+        "Artist Pool" if seed_mode_used == "Artists Only" else "Discovered Artists"
     )
     for aid in sorted(artists):
         info_rows.append({
@@ -937,6 +1040,9 @@ def _build_csv_outputs(
             "earliest_year": yrs.get("earliest", ""),
             "latest_year":   yrs.get("latest", ""),
         }
+        if label_concentration is not None:
+            _conc = label_concentration.get(lid)
+            row_dict["concentration_pct"] = round(_conc, 2) if _conc is not None else ""
         disc_artist_ids = set(aid_map.keys())
         for slid in seed_label_ids_used:
             seed_name = label_names.get(slid, slid)
@@ -960,7 +1066,7 @@ def _build_csv_outputs(
         )
 
     return {
-        "seed_info.csv": csv_safe(pd.DataFrame(info_rows)).to_csv(index=False),
+        "input_info.csv": csv_safe(pd.DataFrame(info_rows)).to_csv(index=False),
         "all_releases.csv": csv_safe(df_raw_out).to_csv(index=False),
         "discovered_labels.csv": csv_safe(pd.DataFrame(label_summary_rows)).to_csv(index=False),
     }
@@ -1009,13 +1115,25 @@ with tab_results:
         st.subheader("Release rows (first 200)")
         st.dataframe(df.head(200), use_container_width=True)
 
+        if _source_used == "snapshot":
+            _caps_params = {
+                "release_caps":                "no caps",
+                "originals_only":              st.session_state.get("originals_used", False),
+                "min_label_concentration_pct": min_concentration or "off",
+                "catalog_size_cap":            max_catalog_size if catalog_cap_on else "off",
+            }
+        else:
+            _caps_artist, _caps_label = st.session_state.get("caps_used", (0, 0))
+            _caps_params = {
+                "max_releases_per_artist": _caps_artist or "no limit",
+                "max_releases_per_label":  _caps_label or "no limit",
+            }
         _export_params = {
             "data_source":             _source_desc_used,
-            "seed_mode":               _seed_mode_used,
+            "input_mode":              _seed_mode_used,
             "fetch_year_min":          _fetch_min_used,
             "fetch_year_max":          _fetch_max_used,
-            "max_releases_per_artist": max_releases_per_artist or "no limit",
-            "max_releases_per_label":  max_releases_per_label or "no limit",
+            **_caps_params,
             "min_releases_per_label":  min_releases_per_label or "no minimum",
             "min_releases_per_artist": min_releases_per_artist or "no minimum",
             "activity_window": (
@@ -1040,7 +1158,10 @@ with tab_results:
             label_names=_label_names,
             params=_export_params,
             label_years=_label_years,
+            label_concentration=_label_conc if _source_used == "snapshot" else None,
         )
+        if _excluded_labels is not None:
+            _csv_outputs["excluded_labels.csv"] = csv_safe(_excluded_labels).to_csv(index=False)
         _results_zip_buf = io.BytesIO()
         with zipfile.ZipFile(_results_zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for _fname, _content in _csv_outputs.items():
@@ -1054,18 +1175,29 @@ with tab_results:
 
     with col_right:
         st.subheader("Unique labels (top 100)")
-        st.dataframe(unique_labels(df).head(100), use_container_width=True)
+        _labels_table = unique_labels(df)
+        if _source_used == "snapshot":
+            _labels_table["concentration_pct"] = (
+                _labels_table["label_id"].astype(str).map(_label_conc).round(2)
+            )
+        st.dataframe(_labels_table.head(100), use_container_width=True)
+
+    if _excluded_labels is not None:
+        with st.expander(f"Excluded labels ({len(_excluded_labels)})"):
+            st.caption(f"Discovered labels with more than {max_catalog_size:,} releases.")
+            st.dataframe(_excluded_labels, use_container_width=True, hide_index=True)
 
     with st.expander("Debug info"):
         st.json(
             {
                 "data_source":     _source_desc_used,
-                "seed_mode":       _seed_mode_used,
-                "seed_labels":     _seed_labels_used,
-                "seed_artists":    _seed_artists_used,
+                "input_mode":      _seed_mode_used,
+                "input_labels":    _seed_labels_used,
+                "input_artists":   _seed_artists_used,
                 "artists_crawled": len(_artists),
-                "fetch_year_min":  fetch_year_min,
-                "fetch_year_max":  fetch_year_max,
+                "fetch_year_min":  _fetch_min_used,
+                "fetch_year_max":  _fetch_max_used,
+                **_caps_params,
                 "raw_rows":        len(df_raw),
                 "filtered_rows":   len(df),
                 "unique_labels":   int(df["label_id"].nunique()),
@@ -1132,7 +1264,7 @@ with tab_graph:
 
     st.caption(
         f"Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges.  \n"
-        f"Node size = artist count from seed labels · Fill = latest year · Border = earliest year · "
+        f"Node size = artist count from input labels · Fill = latest year · Border = earliest year · "
         f"Halo = overlap ratio (releases / artists)"
     )
 
@@ -1416,7 +1548,11 @@ else:
         placeholder="e.g. 1606986, 2742670",
     )
 
-# The local database fills each playlist with the newest releases up to 400 items.
+st.caption(
+    f"The playlist takes the newest release from each input in turn, "
+    f"up to {PLAYLIST_MAX_ITEMS} items."
+)
+
 dnx_max_releases: int = 30
 if data_source == "api":
     dnx_max_releases = st.slider(
@@ -1547,7 +1683,7 @@ if st.button(_btn_labels[dnx_platform], type="primary"):
 
     # Fetch full catalogs from the selected data source
 
-    all_releases: list[dict] = []
+    catalogs: list[list[dict]] = []
     progress = st.progress(0, text="Fetching catalogs…")
     for eidx, eid in enumerate(entity_ids):
         try:
@@ -1557,8 +1693,9 @@ if st.button(_btn_labels[dnx_platform], type="primary"):
                 max_releases=dnx_max_releases,
                 min_year=eff_min_year,
                 max_year=eff_max_year,
+                **_originals_kw,
             )
-            all_releases.extend(catalog)
+            catalogs.append(catalog)
         except Exception as exc:
             st.warning(f"Failed to fetch catalog for {entity_type} {eid}: {md_escape(exc)}")
         progress.progress(
@@ -1566,6 +1703,7 @@ if st.button(_btn_labels[dnx_platform], type="primary"):
             text=f"Fetching catalogs… {eidx + 1}/{len(entity_ids)}",
         )
     progress.empty()
+    all_releases: list[dict] = mix_catalogs(catalogs, max_items=PLAYLIST_MAX_ITEMS)
 
     if not all_releases:
         st.warning("No releases found. Check the IDs and year range.")

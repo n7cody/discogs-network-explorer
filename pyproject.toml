@@ -28,7 +28,7 @@ dev = ["pytest>=8.0.0"]
 
 [project.scripts]
 dne = "discogs_network_explorer.__main__:main"
-dne-update = "discogs_network_explorer.ingest.cli:main"
+dne-db-update = "discogs_network_explorer.ingest.cli:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

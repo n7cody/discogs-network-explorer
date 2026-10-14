@@ -1,4 +1,4 @@
-"""Download a Dump, build a database next to the live one, and swap it in."""
+"""Download a database version, build a database next to the live one, and swap it in."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import BinaryIO
 
 from .build import build_snapshot, read_meta, shrunken_tables
-from .download import KINDS, HttpSource, dump_filename, sha256_file
-from .parse import parse_dump
+from .download import KINDS, HttpSource, dated_filename, sha256_file
+from .parse import parse_xml
 
 log = logging.getLogger(__name__)
 
@@ -72,23 +72,23 @@ def _parse_file(kind: str, raw: BinaryIO, staging: Path, total_bytes: int | None
                 limit: int | None) -> int:
     counter = _CountingReader(raw)
     with gzip.GzipFile(fileobj=counter) as xml:
-        return parse_dump(kind, xml, staging, limit=limit,
+        return parse_xml(kind, xml, staging, limit=limit,
                           progress=_progress_logger(kind, counter, total_bytes, limit))
 
 
-def run_update(db_dir: Path, source: HttpSource, dump: str | None = None, force: bool = False,
+def run_update(db_dir: Path, source: HttpSource, date: str | None = None, force: bool = False,
                keep_downloads: bool = False, limit: int | None = None,
                memory_limit: str | None = None) -> Path:
-    """Build the database for `dump` (default: latest) and make it the live one.
+    """Build the database for `date` (default: latest) and make it the live one.
 
     Returns the live database path. With `limit`, releases are streamed and only
     the first `limit` are parsed (dev runs); such a build will not replace a full
     database unless `force` is set.
     """
     db_dir.mkdir(parents=True, exist_ok=True)
-    dump_date = dump or source.latest_date()
-    if not re.fullmatch(r"\d{8}", dump_date):
-        raise UpdateError(f"dump date must be YYYYMMDD, got {dump_date[:30]!r}")
+    db_date = date or source.latest_date()
+    if not re.fullmatch(r"\d{8}", db_date):
+        raise UpdateError(f"database date must be YYYYMMDD, got {db_date[:30]!r}")
     live = live_snapshot(db_dir)
     live_meta = read_meta(live) if live else None
 
@@ -97,14 +97,14 @@ def run_update(db_dir: Path, source: HttpSource, dump: str | None = None, force:
         if limit is not None and live_full:
             raise UpdateError(f"{live.name} is a full database; a --limit build would replace it "
                               "(use --force, or --db-path for a separate directory)")
-        if limit is None and live_full and live_meta["dump_date"] == dump_date:
-            log.info("database already at dump %s: %s", dump_date, live)
+        if limit is None and live_full and live_meta["db_date"] == db_date:
+            log.info("database already at version %s: %s", db_date, live)
             return live
 
-    log.info("building database for dump %s in %s", dump_date, db_dir)
+    log.info("building database version %s in %s", db_date, db_dir)
     timings: dict[str, float] = {}
-    checksums = {k: v for k, v in source.checksums(dump_date).items()
-                 if k in {dump_filename(dump_date, kind) for kind in KINDS}}
+    checksums = {k: v for k, v in source.checksums(db_date).items()
+                 if k in {dated_filename(db_date, kind) for kind in KINDS}}
     downloads = db_dir / "downloads"
     staging = db_dir / "staging"
     downloads.mkdir(exist_ok=True)
@@ -116,7 +116,7 @@ def run_update(db_dir: Path, source: HttpSource, dump: str | None = None, force:
     for kind in KINDS:
         if kind == "releases" and stream_releases:
             continue
-        name = dump_filename(dump_date, kind)
+        name = dated_filename(db_date, kind)
         dest = downloads / name
         if dest.exists() and sha256_file(dest) == checksums[name]:
             log.info("using existing download %s", dest)
@@ -126,7 +126,7 @@ def run_update(db_dir: Path, source: HttpSource, dump: str | None = None, force:
 
     for kind in KINDS:
         t0 = time.perf_counter()
-        name = dump_filename(dump_date, kind)
+        name = dated_filename(db_date, kind)
         if kind == "releases" and stream_releases:
             log.info("streaming %s (first %d releases)", name, limit)
             with source.open(name) as raw:
@@ -137,9 +137,9 @@ def run_update(db_dir: Path, source: HttpSource, dump: str | None = None, force:
                 _parse_file(kind, raw, staging, path.stat().st_size, None)
         timings[f"parse_{kind}"] = round(time.perf_counter() - t0, 1)
 
-    final = db_dir / f"discogs_{dump_date}.duckdb"
+    final = db_dir / f"discogs_{db_date}.duckdb"
     tmp = final.with_name(final.name + ".tmp")
-    counts = build_snapshot(staging, tmp, dump_date, checksums, timings, release_limit=limit,
+    counts = build_snapshot(staging, tmp, db_date, checksums, timings, release_limit=limit,
                             memory_limit=memory_limit)
 
     if live_meta and live_meta["release_limit"] is None and limit is None:

@@ -335,6 +335,16 @@ def get_label_earliest_year(label_id: str) -> int | None:
         return None
 
 
+def _release_id(rel: dict):
+    """The release ID of an artist-releases item: a master item's main release, else its ID.
+
+    Only a master's main release is visited, not its other versions.
+    """
+    if rel.get("type") == "master":
+        return rel.get("main_release")
+    return rel.get("id")
+
+
 def get_release_details(release_id: str) -> dict:
     """
     Fetch full metadata for a single release.
@@ -567,7 +577,7 @@ def get_master_label_rows(
             continue
 
         for rel in artist_rels:
-            rid = rel.get("id")
+            rid = _release_id(rel)
             if not rid:
                 continue
 
@@ -695,7 +705,7 @@ def get_catalog_videos(
     results: list[dict] = []
 
     for rel in _paged(url, max_items=max_releases):
-        rid = rel.get("id")
+        rid = _release_id(rel)
         if not rid:
             continue
 

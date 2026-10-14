@@ -129,6 +129,6 @@ def test_cli_rejects_bad_limit():
         cli_main(["--limit", "0"])
 
 
-def test_run_update_rejects_bad_dump_date(tmp_path):
+def test_run_update_rejects_bad_db_date(tmp_path):
     with pytest.raises(UpdateError, match="YYYYMMDD"):
-        run_update(tmp_path, source=None, dump="../../etc")
+        run_update(tmp_path, source=None, date="../../etc")

@@ -123,30 +123,31 @@ def api_app(env, monkeypatch):
     return AppTest.from_file(APP, default_timeout=30).run()
 
 
-# Original Releases only
+# Master rule (always on)
 
-ORIGINALS = "Original Releases only"
-
-
-def test_originals_toggle_shown_off_in_local_mode(local_app):
-    assert _by_label(local_app.sidebar.checkbox, ORIGINALS).value is False
+def test_no_original_releases_toggle(local_app):
+    assert "Original Releases only" not in _labels(local_app.sidebar.checkbox)
 
 
-def test_originals_toggle_hidden_in_api_mode(api_app):
-    assert not api_app.exception
-    assert ORIGINALS not in _labels(api_app.sidebar.checkbox)
-
-
-def test_originals_toggle_limits_seed_pool(local_app):
+def test_master_rule_always_applies(local_app):
     # Label 836's only release is a non-main version of its master
-    at = _run(local_app, "836", **{ORIGINALS: True})
+    at = _run(local_app, "836")
     assert not at.exception
     assert any("No artists" in e.value for e in at.error)
+    assert "originals_used" not in at.session_state
 
-    at = _run(at, "836", **{ORIGINALS: False})
+
+def test_outdated_database_falls_back_to_api(env, snapshot):
+    import duckdb
+
+    db = env / "discogs_20261001.duckdb"
+    shutil.copy(snapshot, db)
+    with duckdb.connect(str(db)) as con:
+        con.execute("UPDATE snapshot_meta SET schema_version = 1")
+    at = AppTest.from_file(APP, default_timeout=30).run()
     assert not at.exception
-    assert at.session_state["originals_used"] is False
-    assert len(at.session_state["df_raw"]) == 4
+    assert len(at.sidebar.radio) == 0
+    assert any("dne-db-update" in c.value and "older" in c.value for c in at.sidebar.caption)
 
 
 # Label overlap
@@ -191,10 +192,10 @@ def test_export_follows_filters_and_ranks_by_weighted_overlap(local_app):
     assert "99137" in set(labels["label_id"])
 
 
-def test_dj_mixes_excluded_by_default(local_app):
+def test_dj_mixes_have_no_toggle(local_app):
     at = _run(local_app, "99137")
-    assert _by_label(at.sidebar.checkbox, "Exclude DJ mixes").value is True
-    assert _params(at)["exclude_dj_mixes"] == "True"
+    assert "Exclude DJ mixes" not in {c.label for c in at.sidebar.checkbox}
+    assert "exclude_dj_mixes" not in _params(at)
 
 
 def test_graph_names_toggle_swaps_versions(local_app):
@@ -248,7 +249,8 @@ def test_artist_activity_uses_full_history_in_local_mode(local_app):
     at = _run(at, "")
     _by_label(at.sidebar.slider, "Activity window year range").set_value((2007, 2008))
     _by_label(at.sidebar.slider, "Min releases within activity window").set_value(3)
-    # The Results Window keeps only 712683's two 2008 releases; its full history has three
+    # The Results Window keeps 712683's one original 2008 release; its full history has three
+    _by_label(at.sidebar.slider, "Min releases per label").set_value(1)
     _by_label(at.sidebar.number_input, "Year from").set_value(2008).run()
     assert not at.exception
     assert set(at.dataframe[0].value["artist_id"].astype(str)) == {"712683"}
@@ -263,10 +265,10 @@ def _params(at):
 
 
 def test_export_records_local_settings(local_app):
-    at = _run(local_app, "99137", **{ORIGINALS: False})
+    at = _run(local_app, "99137")
     params = _params(at)
     assert params["release_caps"] == "no caps"
-    assert params["originals_only"] == "False"
+    assert "originals_only" not in params
     assert params["min_label_overlap_pct"] == "off"
     assert params["catalog_size_cap"] == "off"
     assert "max_releases_per_artist" not in params
@@ -314,3 +316,42 @@ def test_api_mode_shows_no_local_only_controls(api_app, stub_api):
     params = _params(at)
     assert params["max_releases_per_artist"] == "40"
     assert "release_caps" not in params
+
+
+# dnx review table
+
+def test_dnx_review_shows_searched_track(local_app, monkeypatch):
+    import re
+
+    from discogs_network_explorer import apple_music
+    from discogs_network_explorer.matching import REVIEW_COLUMNS, query_key, review_rows
+
+    queries: list[str] = []
+
+    def fake_search_songs(developer_token, query, storefront="us", limit=5):
+        queries.append(query)
+        artist, title = query.split(" - ", 1)
+        return [{"song_id": "id-" + title, "title": title + " (Dub)", "artist": artist}]
+
+    monkeypatch.setattr(apple_music, "load_config", lambda: {"developer_token": "dev"})
+    monkeypatch.setattr(apple_music, "load_user_token", lambda: "user")
+    monkeypatch.setattr(apple_music, "search_songs", fake_search_songs)
+
+    at = _run(local_app, "99137")
+    assert not at.exception
+    at.radio(key="dnx_platform").set_value("Apple Music").run()
+    _by_label(at.radio, "Input type").set_value("Label IDs").run()
+    _by_label(at.text_input, "Label IDs (comma separated)").set_value("99137")
+    _by_label(at.button, "Build Apple Music Playlist").click().run()
+    assert not at.exception
+    if "dnx_pending" not in at.session_state:
+        at.run()
+    pending = at.session_state["dnx_pending"]
+
+    assert any(b["discogs_track"] == "Down Time" and b["release"] == "Early Smoke E.P"
+               and b["query_kind"] == "track" for b in pending["borderline"])
+    assert list(review_rows(pending["borderline"], include=True)[0]) == REVIEW_COLUMNS
+    assert not [q for q in queries if re.search(r" \(\d+\)", q)]
+    keys = {query_key({"query_kind": "track", "artist": q.split(" - ", 1)[0], "title": q.split(" - ", 1)[1]})
+            for q in queries}
+    assert len(queries) == len(keys)

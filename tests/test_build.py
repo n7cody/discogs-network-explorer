@@ -3,7 +3,7 @@ import json
 import duckdb
 import pytest
 
-from discogs_network_explorer.ingest.build import read_meta, shrunken_tables
+from discogs_network_explorer.ingest.build import SCHEMA_VERSION, read_meta, shrunken_tables
 
 
 @pytest.fixture(scope="module")
@@ -27,6 +27,7 @@ def test_base_tables_loaded(con):
     assert one(con, "SELECT count(*) FROM artists") == (225,)
     assert one(con, "SELECT count(*) FROM labels") == (31,)
     assert one(con, "SELECT count(*) FROM masters") == (18,)
+    assert one(con, "SELECT count(*) FROM sub_tracks") == (0,)
 
 
 def test_unofficial_overrides_every_role(con):
@@ -77,7 +78,8 @@ def test_snapshot_meta(snapshot):
     assert meta["timings"]["parse"] == 1.0
     assert "load" in meta["timings"]
     assert meta["release_limit"] is None
-    assert meta["schema_version"] >= 1
+    assert meta["schema_version"] == SCHEMA_VERSION == 2
+    assert "sub_tracks" in meta["row_counts"]
 
 
 def test_read_meta_missing_file(tmp_path):

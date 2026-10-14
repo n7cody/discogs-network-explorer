@@ -1,10 +1,10 @@
 release_id,reason
 1,has YouTube video
-3,track-level Remix credit
+3,track-level Remix credit; set as main release so the master rule keeps it
 9,Executive-Producer (must be ignored)
 12,Co-producer credit
 22,release-level Producer with bracket modifier
-367,no release year
+367,no release year; set as main release so the master rule keeps it
 1983,alias group: two names of one artist
 2921,unofficial release
 4737,unofficial release with real artists

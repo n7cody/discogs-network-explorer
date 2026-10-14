@@ -5,7 +5,8 @@
 -- name: seed_pool
 -- Seed Labels -> artist pool, in discovery order (first Seed Release, then artist ID).
 -- Track Artists count except on DJ mixes that are not Various Artists releases.
--- $seed_label_ids BIGINT[], $min_year, $max_year INTEGER (NULL = open), $originals_only BOOLEAN
+-- Only original releases count (no master, or the master's main release).
+-- $seed_label_ids BIGINT[], $min_year, $max_year INTEGER (NULL = open)
 WITH seed_labels AS (
     SELECT DISTINCT unnest($seed_label_ids) AS label_id
 ),
@@ -15,7 +16,7 @@ seed_releases AS (
     JOIN release_labels rl USING (label_id)
     JOIN releases r USING (release_id)
     WHERE (r.year IS NULL OR r.year BETWEEN coalesce($min_year, 0) AND coalesce($max_year, 9999))
-      AND (NOT $originals_only OR r.master_id IS NULL OR r.is_main_release)
+      AND (r.master_id IS NULL OR r.is_main_release)
 ),
 various_artists_releases AS (
     SELECT ra.release_id
@@ -42,7 +43,8 @@ ORDER BY min(arr.release_id), arr.artist_id;
 
 -- name: label_rows
 -- Artist pool -> one row per (artist, release, label), all years, no caps.
--- $artist_ids BIGINT[], $originals_only BOOLEAN
+-- Only original releases count (no master, or the master's main release).
+-- $artist_ids BIGINT[]
 WITH pool AS (
     SELECT DISTINCT unnest($artist_ids) AS artist_id
 ),
@@ -100,7 +102,7 @@ JOIN release_label_links rl USING (release_id)
 LEFT JOIN artists a ON a.artist_id = p.artist_id
 LEFT JOIN release_format_names fn ON fn.release_id = p.release_id
 LEFT JOIN release_format_descriptions fd ON fd.release_id = p.release_id
-WHERE NOT $originals_only OR r.master_id IS NULL OR r.is_main_release
+WHERE r.master_id IS NULL OR r.is_main_release
 ORDER BY p.artist_id, p.release_id, rl.label_id;
 
 -- name: label_stats
@@ -171,22 +173,60 @@ FROM artists
 WHERE artist_id = $artist_id;
 
 -- name: catalog_videos
--- dnx catalog of one label or one artist. Releases are taken newest first and added whole
--- while the playlist stays within $max_tracks items; a release brings its videos, or its
--- tracklist entries when it has no videos.
--- $label_id, $artist_id BIGINT (one is NULL), $min_year, $max_year INTEGER, $originals_only BOOLEAN,
--- $max_tracks INTEGER
+-- dnx catalog of one label or one artist. Only original releases (no master, or the master's
+-- main release). Releases are taken newest first and added whole while the playlist stays
+-- within $max_tracks items; a release brings its videos, or its playable tracklist entries
+-- when it has no videos. Playable: sub-tracks replace their index track; headings (no position
+-- and no duration on a release with positions) and empty titles are dropped. Sub-tracks take
+-- the parent track's artists, then the main artists.
+-- $label_id, $artist_id BIGINT (one is NULL), $min_year, $max_year, $max_tracks INTEGER
 WITH catalog AS (
     SELECT release_id FROM release_labels WHERE label_id = $label_id
     UNION
     SELECT release_id FROM artist_release_roles WHERE artist_id = $artist_id
 ),
 catalog_releases AS (
-    SELECT r.release_id, r.title, r.year
+    SELECT r.release_id, r.title, r.year, r.master_id
     FROM releases r
     WHERE r.release_id IN (SELECT release_id FROM catalog)
       AND (r.year IS NULL OR r.year BETWEEN coalesce($min_year, 0) AND coalesce($max_year, 9999))
-      AND (NOT $originals_only OR r.master_id IS NULL OR r.is_main_release)
+      AND (r.master_id IS NULL OR r.is_main_release)
+),
+catalog_tracks AS (
+    SELECT release_id, seq,
+           coalesce(trim(position), '') AS position,
+           coalesce(trim(title), '')    AS title,
+           coalesce(trim(duration), '') AS duration
+    FROM tracks
+    WHERE release_id IN (SELECT release_id FROM catalog_releases)
+),
+catalog_sub_tracks AS (
+    SELECT release_id, track_seq, seq,
+           coalesce(trim(position), '') AS position,
+           coalesce(trim(title), '')    AS title,
+           coalesce(trim(duration), '') AS duration
+    FROM sub_tracks
+    WHERE release_id IN (SELECT release_id FROM catalog_releases)
+),
+index_tracks AS (
+    SELECT DISTINCT release_id, track_seq FROM catalog_sub_tracks
+),
+positioned_releases AS (
+    SELECT release_id FROM catalog_tracks GROUP BY release_id HAVING bool_or(position <> '')
+),
+playable_entries AS (
+    -- index tracks give way to their sub-tracks; headings have no position and no duration
+    SELECT t.release_id, t.seq AS track_seq, -1 AS sub_seq, t.position, t.title, t.duration
+    FROM catalog_tracks t
+    LEFT JOIN index_tracks i ON i.release_id = t.release_id AND i.track_seq = t.seq
+    WHERE i.release_id IS NULL
+      AND t.title <> ''
+      AND NOT (t.position = '' AND t.duration = ''
+               AND t.release_id IN (SELECT release_id FROM positioned_releases))
+    UNION ALL
+    SELECT release_id, track_seq, seq, position, title, duration
+    FROM catalog_sub_tracks
+    WHERE title <> ''
 ),
 video_counts AS (
     SELECT release_id, count(*) AS n_videos
@@ -196,43 +236,36 @@ video_counts AS (
 ),
 track_counts AS (
     SELECT release_id, count(*) AS n_tracks
-    FROM tracks
-    WHERE release_id IN (SELECT release_id FROM catalog_releases
-                         WHERE release_id NOT IN (SELECT release_id FROM video_counts))
-      AND trim(title) <> ''
+    FROM playable_entries
     GROUP BY release_id
 ),
 playlist_items AS (
-    SELECT c.release_id,
-           c.title,
-           c.year,
+    SELECT c.release_id, c.title, c.year, c.master_id,
            coalesce(v.n_videos, t.n_tracks, 0) AS n_items
     FROM catalog_releases c
     LEFT JOIN video_counts v USING (release_id)
     LEFT JOIN track_counts t USING (release_id)
 ),
 selected_releases AS (
-    SELECT release_id, title, year
+    SELECT release_id, title, year, master_id
     FROM (
-        SELECT release_id,
-               title,
-               year,
+        SELECT release_id, title, year, master_id,
                sum(n_items) OVER (ORDER BY year DESC NULLS LAST, release_id DESC
                                   ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS playlist_size
         FROM playlist_items
     ) AS running_totals
     WHERE playlist_size <= $max_tracks
 ),
-tracklist_entries AS (
-    SELECT release_id, seq, coalesce(position, '') AS position, trim(title) AS title
-    FROM tracks
-    WHERE release_id IN (SELECT release_id FROM selected_releases)
-      AND trim(title) <> ''
-),
 release_video_lists AS (
     SELECT release_id,
            list({'url': url, 'title': coalesce(title, '')} ORDER BY seq) AS videos
     FROM release_videos
+    WHERE release_id IN (SELECT release_id FROM selected_releases)
+    GROUP BY release_id
+),
+release_format_descriptions AS (
+    SELECT release_id, flatten(list(coalesce(descriptions, []) ORDER BY seq)) AS format_descriptions
+    FROM release_formats
     WHERE release_id IN (SELECT release_id FROM selected_releases)
     GROUP BY release_id
 ),
@@ -256,14 +289,16 @@ track_artist_names AS (
     GROUP BY release_id, track_seq
 ),
 release_tracklists AS (
-    SELECT te.release_id,
-           list({'position': te.position,
-                 'title': te.title,
-                 'artist': coalesce(ta.credited_names, ma.credited_names, '')} ORDER BY te.seq) AS tracklist
-    FROM tracklist_entries te
-    LEFT JOIN track_artist_names ta ON ta.release_id = te.release_id AND ta.track_seq = te.seq
-    LEFT JOIN main_artist_names ma ON ma.release_id = te.release_id
-    GROUP BY te.release_id
+    SELECT pe.release_id,
+           list({'position': pe.position,
+                 'title': pe.title,
+                 'artist': coalesce(ta.credited_names, ma.credited_names, ''),
+                 'duration': pe.duration} ORDER BY pe.track_seq, pe.sub_seq) AS tracklist
+    FROM playable_entries pe
+    LEFT JOIN track_artist_names ta ON ta.release_id = pe.release_id AND ta.track_seq = pe.track_seq
+    LEFT JOIN main_artist_names ma ON ma.release_id = pe.release_id
+    WHERE pe.release_id IN (SELECT release_id FROM selected_releases)
+    GROUP BY pe.release_id
 ),
 catalog_label_names AS (
     SELECT release_id, min(label_name) AS label_name
@@ -275,12 +310,15 @@ SELECT CAST(s.release_id AS VARCHAR)   AS release_id,
        coalesce(s.title, '')           AS release_title,
        coalesce(ma.display_name, '')   AS artist_name,
        s.year,
+       CAST(s.master_id AS VARCHAR)    AS master_id,
+       fd.format_descriptions,
        v.videos,
        tl.tracklist,
        coalesce(ln.label_name, '')     AS label_name
 FROM selected_releases s
 LEFT JOIN release_video_lists v USING (release_id)
 LEFT JOIN release_tracklists tl USING (release_id)
+LEFT JOIN release_format_descriptions fd USING (release_id)
 LEFT JOIN main_artist_names ma USING (release_id)
 LEFT JOIN catalog_label_names ln USING (release_id)
 ORDER BY s.year DESC NULLS LAST, s.release_id DESC;

@@ -4,7 +4,7 @@ import duckdb
 import pytest
 
 from discogs_network_explorer.ingest import cli
-from discogs_network_explorer.ingest.build import read_meta
+from discogs_network_explorer.ingest.build import SCHEMA_VERSION, read_meta
 from discogs_network_explorer.ingest.download import HttpSource
 from discogs_network_explorer.ingest.update import UpdateError, default_db_dir, live_snapshot, run_update
 
@@ -34,6 +34,18 @@ def test_already_current_is_skipped(tmp_path, source):
     assert read_meta(path)["built_at"] == built_at
     run_update(tmp_path, source, force=True)
     assert read_meta(path)["built_at"] > built_at
+
+
+def test_old_schema_is_rebuilt(tmp_path, source):
+    path = run_update(tmp_path, source)
+    con = duckdb.connect(str(path))
+    con.execute("UPDATE snapshot_meta SET schema_version = 1")
+    con.close()
+    built_at = read_meta(path)["built_at"]
+    assert run_update(tmp_path, source) == path
+    meta = read_meta(path)
+    assert meta["schema_version"] == SCHEMA_VERSION
+    assert meta["built_at"] > built_at
 
 
 def test_old_snapshot_replaced(tmp_path, source):

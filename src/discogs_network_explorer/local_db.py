@@ -15,6 +15,7 @@ from typing import Iterable
 import duckdb
 
 from .backend import build_label_to_artists  # noqa: F401  (shared interface, backend-independent)
+from .ingest.build import SCHEMA_VERSION
 from .ingest.update import default_db_dir, live_snapshot
 
 
@@ -34,6 +35,10 @@ SETTINGS = {"dynamic_or_filter_threshold": 10_000}
 # Connection
 
 class SnapshotMissing(RuntimeError):
+    pass
+
+
+class SnapshotOutdated(RuntimeError):
     pass
 
 
@@ -79,6 +84,16 @@ def _cursor() -> duckdb.DuckDBPyConnection:
             # SET GLOBAL so cursors inherit it; a connect-time config would stop other
             # readers (e.g. ingest.build.read_meta) opening the same file in this process
             _con = duckdb.connect(str(path), read_only=True)
+            try:
+                version = _con.execute("SELECT max(schema_version) FROM snapshot_meta").fetchone()[0] or 0
+            except duckdb.Error:
+                version = 0
+            if version < SCHEMA_VERSION:
+                _con.close()
+                _con = None
+                _con_key = None
+                raise SnapshotOutdated(f"The local database {path.name} uses schema {version}; this version "
+                                       f"needs {SCHEMA_VERSION}. Run `dne-db-update` to rebuild it.")
             for name, value in SETTINGS.items():
                 _con.execute(f"SET GLOBAL {name} = {value}")
             _con_key = key
@@ -111,15 +126,15 @@ def get_master_artist_list(
     label_ids: list[str],
     min_year: int | None = None,
     max_year: int | None = None,
-    originals_only: bool = False,
 ) -> list[str]:
     """Artist IDs credited on Seed Label releases within the Seed Window, in discovery order.
 
     Main Artists, Producer / Co-producer / Remix credits, and Track Artists on
-    Various Artists releases. Releases with no year are kept.
+    Various Artists releases. Releases with no year are kept. Only original releases
+    are read (no master, or the master's main release).
     """
     rows = _rows("seed_pool", seed_label_ids=_ids(label_ids), min_year=min_year or None,
-                 max_year=max_year or None, originals_only=originals_only)
+                 max_year=max_year or None)
     return [r["artist_id"] for r in rows]
 
 
@@ -133,16 +148,16 @@ def get_master_label_rows(
     max_year: int | None = None,
     seed_label_ids: list[str] | None = None,
     max_global_releases: int | None = None,
-    originals_only: bool = False,
 ) -> list[dict]:
     """One row per (artist, release, label) for every release credited to the artists.
 
     All years are returned: the year range and cap arguments are accepted for
     interface compatibility and ignored in local database mode. Not On Label is dropped.
     Row keys as `backend.get_master_label_rows`, except `format` is replaced by
-    `format_names` and `format_descriptions`.
+    `format_names` and `format_descriptions`. Only original releases are read (no master,
+    or the master's main release).
     """
-    return _rows("label_rows", artist_ids=_ids(artists), originals_only=originals_only)
+    return _rows("label_rows", artist_ids=_ids(artists))
 
 
 # Labels and artists
@@ -212,14 +227,16 @@ def get_catalog_videos(
     min_year: int | None = None,
     max_year: int | None = None,
     max_tracks: int = 400,
-    originals_only: bool = False,
 ) -> list[dict]:
-    """A label's or artist's releases with videos and tracklists, newest first.
+    """A label's or artist's original releases with videos and tracklists, newest first.
 
     Whole releases are added while the playlist stays within `max_tracks` items
-    (each release counts its videos, or its tracklist entries when it has none).
+    (each release counts its videos, or its playable tracklist entries when it has none).
     `max_releases` is accepted for interface compatibility and ignored. Releases
-    with no year are kept and come last. Same shape as `backend.get_catalog_videos`.
+    with no year are kept and come last. Same shape as `backend.get_catalog_videos`:
+    release_id, release_title, artist_name, year, master_id (str|None),
+    format_descriptions (list[str]), videos [{url, title}],
+    tracklist [{position, title, artist, duration}], label_name.
     """
     ids = _ids([entity_id])
     entity = ids[0] if ids else None
@@ -227,10 +244,11 @@ def get_catalog_videos(
                  label_id=entity if entity_type == "label" else None,
                  artist_id=entity if entity_type == "artist" else None,
                  min_year=min_year or None, max_year=max_year or None,
-                 originals_only=originals_only, max_tracks=max_tracks)
+                 max_tracks=max_tracks)
     for r in rows:
         r["videos"] = r["videos"] or []
         r["tracklist"] = r["tracklist"] or []
+        r["format_descriptions"] = r["format_descriptions"] or []
     return rows
 
 

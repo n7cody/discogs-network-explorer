@@ -47,9 +47,10 @@ def test_seed_window_keeps_releases_without_year():
     assert local_db.get_master_artist_list(["184"], min_year=2000, max_year=2001) == ["515", "617", "14332"]
 
 
-def test_originals_only_drops_non_main_versions():
-    assert local_db.get_master_artist_list(["836"]) == ["3225"]
-    assert local_db.get_master_artist_list(["836"], originals_only=True) == []
+def test_master_rule_drops_non_main_versions():
+    assert local_db.get_master_artist_list(["836"]) == []
+    rows = local_db.get_master_label_rows(["3225"])
+    assert sorted((r["release_id"], r["label_id"]) for r in rows) == [("116925", "93")]
 
 
 # Artists -> label rows
@@ -75,18 +76,18 @@ def label_rows():
 
 
 def test_label_rows_pool_artists_per_label(label_rows):
-    assert len(label_rows) == 68
+    assert len(label_rows) == 65
     assert all(set(r) == ROW_KEYS for r in label_rows)
     assert pool_artists_per_label(label_rows) == POOL_ARTISTS_PER_LABEL
 
 
 def test_label_row_fields():
     rows = local_db.get_master_label_rows(["712683"])
-    row = next(r for r in rows if r["release_id"] == "1568748")
+    row = next(r for r in rows if r["release_id"] == "1559757")
     assert row == {
-        "artist_id": "712683", "artist_name": "Homero Espinosa", "release_id": "1568748",
+        "artist_id": "712683", "artist_name": "Homero Espinosa", "release_id": "1559757",
         "release_title": "YBDSF Studio Sessions EP", "role": "Main", "format_names": "Vinyl",
-        "format_descriptions": '12", EP, White Label', "genres": "Electronic",
+        "format_descriptions": '12", EP', "genres": "Electronic",
         "styles": "Deep House", "country": "UK", "year": 2008, "label_id": "99137",
         "label_name": "Smoke City Music"}
 
@@ -99,14 +100,8 @@ def test_label_rows_ignore_caps_and_years(label_rows):
 
 
 def test_label_rows_one_per_artist_release_label():
-    rows = local_db.get_master_label_rows(["3225"])  # 50606 lists label 836 twice (two catnos)
-    assert sorted((r["release_id"], r["label_id"]) for r in rows) == [
-        ("116236", "93"), ("116925", "93"), ("1744568", "836"), ("50606", "836")]
-
-
-def test_label_rows_originals_only():
-    rows = local_db.get_master_label_rows(["3225"], originals_only=True)
-    assert [r["release_id"] for r in rows] == ["116925"]
+    rows = local_db.get_master_label_rows(["3"])  # release 3 lists labels 6 and 35 twice (two catnos)
+    assert sorted((r["release_id"], r["label_id"]) for r in rows) == [("3", "35"), ("3", "6")]
 
 
 def test_label_rows_exclude_not_on_label():
@@ -185,7 +180,7 @@ def test_artist_name():
 # dnx catalogs
 
 # Seed label catalog newest first, with playlist items per release (videos, else tracks)
-SEED_CATALOG = [("1834508", 3), ("1752850", 2), ("1658191", 2), ("1568748", 3), ("1559757", 2),
+SEED_CATALOG = [("1834508", 3), ("1752850", 2), ("1658191", 2), ("1559757", 2),
                 ("1524016", 2), ("1409908", 4), ("1345585", 4), ("1129429", 3)]
 
 
@@ -200,18 +195,18 @@ def test_catalog_newest_first():
 def test_catalog_adds_whole_releases_up_to_max_tracks():
     ids = [rid for rid, _ in SEED_CATALOG]
     assert catalog_ids(entity_type="label", entity_id=SEED, max_tracks=10) == ids[:4]
-    assert catalog_ids(entity_type="label", entity_id=SEED, max_tracks=11) == ids[:4]
+    assert catalog_ids(entity_type="label", entity_id=SEED, max_tracks=11) == ids[:5]
     assert catalog_ids(entity_type="label", entity_id=SEED, max_tracks=12) == ids[:5]
     assert catalog_ids(entity_type="label", entity_id=SEED, max_tracks=2) == []
 
 
 def test_catalog_ignores_max_releases():
-    assert len(catalog_ids(entity_type="label", entity_id=SEED, max_releases=1)) == 9
+    assert len(catalog_ids(entity_type="label", entity_id=SEED, max_releases=1)) == len(SEED_CATALOG)
 
 
 def test_catalog_year_window():
     assert catalog_ids(entity_type="label", entity_id=SEED, min_year=2009) == ["1834508", "1752850", "1658191"]
-    assert len(catalog_ids(entity_type="label", entity_id=SEED, max_year=2008)) == 6
+    assert len(catalog_ids(entity_type="label", entity_id=SEED, max_year=2008)) == 5
     assert catalog_ids(entity_type="label", entity_id="184", min_year=2000, max_year=2001) == ["367"]
 
 
@@ -222,6 +217,8 @@ def test_catalog_release_shape():
         "release_title": "Early Smoke E.P",
         "artist_name": "Slum Science, The Hoodfellas",
         "year": 2007,
+        "master_id": None,
+        "format_descriptions": ['12"', "EP"],
         "videos": [
             {"url": "https://www.youtube.com/watch?v=Pg6BOAmdmdM", "title": "Slum Science - Down Time"},
             {"url": "https://www.youtube.com/watch?v=jUCkadauezM", "title": "The Hoodfellas -  3 Way"},
@@ -229,9 +226,10 @@ def test_catalog_release_shape():
              "title": "The Hoodfellas  - 3 Way (Danny White Redid)"},
         ],
         "tracklist": [
-            {"position": "A1", "title": "Down Time", "artist": "Slum Science"},
-            {"position": "B1", "title": "3 Way", "artist": "The Hoodfellas"},
-            {"position": "B2", "title": "3 Way (Danny White Redid)", "artist": "The Hoodfellas"},
+            {"position": "A1", "title": "Down Time", "artist": "Slum Science", "duration": ""},
+            {"position": "B1", "title": "3 Way", "artist": "The Hoodfellas", "duration": ""},
+            {"position": "B2", "title": "3 Way (Danny White Redid)", "artist": "The Hoodfellas",
+             "duration": ""},
         ],
         "label_name": "Smoke City Music",
     }
@@ -249,9 +247,34 @@ def test_catalog_tracklist_artists():
 
 def test_artist_catalog():
     rels = local_db.get_catalog_videos("artist", "3225")
-    assert [r["release_id"] for r in rels] == ["1744568", "116925", "116236", "50606"]
+    assert [r["release_id"] for r in rels] == ["116925"]
     assert {r["label_name"] for r in rels} == {""}
-    assert catalog_ids(entity_type="artist", entity_id="3225", originals_only=True) == ["116925"]
+
+
+def test_catalog_headings_and_sub_tracks(snapshot, tmp_path):
+    copy = tmp_path / "snap.duckdb"
+    shutil.copy(snapshot, copy)
+    with duckdb.connect(str(copy)) as con:
+        con.execute("INSERT INTO tracks VALUES (1345585, 90, '', 'Side Heading', NULL), "
+                    "(1345585, 91, '', 'Suite', NULL)")
+        con.execute("INSERT INTO sub_tracks VALUES (1345585, 91, 0, 'C1a', 'Part One', '3:00'), "
+                    "(1345585, 91, 1, 'C1b', 'Part Two', '')")
+    local_db.use_snapshot(copy)
+    try:
+        by_id = {r["release_id"]: r for r in local_db.get_catalog_videos("label", SEED)}
+        tracks = by_id["1345585"]["tracklist"]
+        assert [t["title"] for t in tracks] == [
+            "Humble Me", "Humble Me (Inland Knights Remix)", "Humble Me (Hoodfellas Deep Attractions Mix)",
+            "Life Support", "Part One", "Part Two"]
+        assert tracks[-1]["artist"] == "Non Believers, Astral T"
+        # 1345585 now brings 6 items instead of 4
+        ids = [rid for rid, _ in SEED_CATALOG]
+        n_before = sum(n for _, n in SEED_CATALOG[:6])
+        assert ids[6] == "1345585"
+        assert catalog_ids(entity_type="label", entity_id=SEED, max_tracks=n_before + 4) == ids[:6]
+        assert catalog_ids(entity_type="label", entity_id=SEED, max_tracks=n_before + 6) == ids[:7]
+    finally:
+        local_db.use_snapshot(snapshot)
 
 
 # API-only functions and the connection
@@ -296,6 +319,19 @@ def test_snapshot_meta_readable_while_connected(snapshot):
 
     local_db.get_label_name(SEED)
     assert read_meta(snapshot)["db_date"] == "20261001"
+
+
+def test_outdated_schema_raises(snapshot, tmp_path):
+    copy = tmp_path / "snap.duckdb"
+    shutil.copy(snapshot, copy)
+    with duckdb.connect(str(copy)) as con:
+        con.execute("UPDATE snapshot_meta SET schema_version = 1")
+    local_db.use_snapshot(copy)
+    try:
+        with pytest.raises(local_db.SnapshotOutdated, match="dne-db-update"):
+            local_db.get_label_name(SEED)
+    finally:
+        local_db.use_snapshot(snapshot)
 
 
 def test_missing_snapshot(tmp_path, monkeypatch, snapshot):

@@ -31,6 +31,8 @@ SCHEMAS: dict[str, pa.Schema] = {k: pa.schema(v) for k, v in {
                         ("artist_name", _S), ("anv", _S)],
     "tracks": [("release_id", _I64), ("seq", _I32), ("position", _S), ("title", _S),
                ("duration", _S)],
+    "sub_tracks": [("release_id", _I64), ("track_seq", _I32), ("seq", _I32), ("position", _S),
+                   ("title", _S), ("duration", _S)],
     "track_artists": [("release_id", _I64), ("track_seq", _I32), ("artist_id", _I64),
                       ("artist_name", _S)],
     "credits": [("release_id", _I64), ("track_seq", _I32), ("artist_id", _I64),
@@ -44,7 +46,7 @@ SCHEMAS: dict[str, pa.Schema] = {k: pa.schema(v) for k, v in {
 
 TABLES_BY_KIND: dict[str, tuple[str, ...]] = {
     "releases": ("releases", "release_formats", "release_labels", "release_artists", "tracks",
-                 "track_artists", "credits", "release_videos"),
+                 "sub_tracks", "track_artists", "credits", "release_videos"),
     "artists": ("artists",),
     "labels": ("labels",),
     "masters": ("masters",),
@@ -108,6 +110,13 @@ def _release(el, out: dict[str, list]) -> None:
         tt = lambda tag: tk[tag].text if tag in tk else None
         out["tracks"].append({"release_id": rid, "seq": i, "position": tt("position"),
                               "title": tt("title"), "duration": tt("duration")})
+        if "sub_tracks" in tk:
+            for j, st in enumerate(tk["sub_tracks"].iterfind("track")):
+                sk = {c.tag: c for c in st}
+                out["sub_tracks"].append({"release_id": rid, "track_seq": i, "seq": j,
+                                          "position": sk["position"].text if "position" in sk else None,
+                                          "title": sk["title"].text if "title" in sk else None,
+                                          "duration": sk["duration"].text if "duration" in sk else None})
         for a in _people(tk.get("artists")):
             out["track_artists"].append({"release_id": rid, "track_seq": i,
                                          "artist_id": _int(a.get("id")), "artist_name": a.get("name")})

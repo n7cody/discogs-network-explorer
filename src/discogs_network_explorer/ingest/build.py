@@ -15,7 +15,7 @@ from .parse import SCHEMAS
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DERIVED_TABLES = ("artist_release_roles", "label_stats", "artist_stats")
 
 # Sort order on load; DuckDB skips row groups by min/max, so sorted keys make lookups fast

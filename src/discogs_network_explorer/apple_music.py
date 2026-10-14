@@ -172,21 +172,26 @@ def _dev_headers(developer_token: str) -> dict:
     }
 
 
-def search_song(
+AM_SEARCH_LIMIT = 5
+
+
+def search_songs(
     developer_token: str,
     query: str,
     storefront: str = "us",
-) -> dict | None:
+    limit: int = AM_SEARCH_LIMIT,
+) -> list[dict]:
     """
-    Search Apple Music for a song.
+    Search Apple Music for songs.
 
     Args:
         developer_token: JWT developer token.
         query:           Search string (e.g. "Artist - Title").
         storefront:      ISO 3166-1 alpha-2 country code (default: "us").
+        limit:           Maximum number of songs returned.
 
     Returns:
-        Dict with 'song_id', 'title', 'artist', or None if no result.
+        List of dicts with 'song_id', 'title', 'artist', in search order; [] if none.
     """
     resp = requests.get(
         f"{_API_BASE}/catalog/{quote(storefront, safe='')}/search",
@@ -194,7 +199,7 @@ def search_song(
         params={
             "term": query,
             "types": "songs",
-            "limit": 1,
+            "limit": limit,
         },
         timeout=_TIMEOUT,
     )
@@ -202,16 +207,21 @@ def search_song(
     data = resp.json()
 
     songs = data.get("results", {}).get("songs", {}).get("data", [])
-    if not songs:
-        return None
-
-    song = songs[0]
-    attrs = song.get("attributes", {})
-    return {
+    return [{
         "song_id": song["id"],
-        "title": attrs.get("name", ""),
-        "artist": attrs.get("artistName", ""),
-    }
+        "title": song.get("attributes", {}).get("name", ""),
+        "artist": song.get("attributes", {}).get("artistName", ""),
+    } for song in songs]
+
+
+def search_song(
+    developer_token: str,
+    query: str,
+    storefront: str = "us",
+) -> dict | None:
+    """The top Apple Music song for `query`, or None if no result."""
+    results = search_songs(developer_token, query, storefront, limit=1)
+    return results[0] if results else None
 
 
 def create_playlist(

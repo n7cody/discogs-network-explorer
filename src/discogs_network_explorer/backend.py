@@ -33,6 +33,8 @@ from typing import Iterable
 
 import requests
 
+from .matching import playable_tracks
+
 
 # COOKIE-LESS SESSION
 
@@ -345,6 +347,24 @@ def _release_id(rel: dict):
     return rel.get("id")
 
 
+_MASTER_MAIN: dict[str, str | None] = {}
+
+
+def _is_original(release_id, master_id) -> bool:
+    """True for a release with no master, or its master's main release (one cached call per master)."""
+    if not master_id:
+        return True
+    key = str(master_id)
+    if key not in _MASTER_MAIN:
+        try:
+            main = _safe_get(f"{API_BASE}/masters/{_id_path(key)}").get("main_release")
+            _MASTER_MAIN[key] = str(main) if main else None
+        except Exception:
+            _MASTER_MAIN[key] = None
+    main = _MASTER_MAIN[key]
+    return main is None or main == str(release_id)
+
+
 def get_release_details(release_id: str) -> dict:
     """
     Fetch full metadata for a single release.
@@ -361,8 +381,11 @@ def get_release_details(release_id: str) -> dict:
         year      — int or None
         videos    — list of {"url": str, "title": str} (YouTube links from
                     the Discogs release page, community-curated)
-        tracklist — list of {"position": str, "title": str, "artist": str}
-                    per-track entries with individual artist names resolved
+        tracklist — list of {"position", "title", "artist", "duration"}: playable
+                    entries only (sub-tracks replace index tracks, headings dropped),
+                    with individual artist names resolved
+        master_id — str or None
+        format_descriptions — list of format description strings
     """
     data = _safe_get(f"{API_BASE}/releases/{_id_path(release_id)}")
 
@@ -392,21 +415,30 @@ def get_release_details(release_id: str) -> dict:
         if (a.get("name") or "").strip().lower() not in {"various", "various artists"}
     ]
     top_artist_str = ", ".join(top_artists) if top_artists else ""
-    for track in (data.get("tracklist") or []):
-        track_title = (track.get("title") or "").strip()
-        if not track_title:
-            continue
-        track_artists = [
+
+    def credited(entry: dict) -> str:
+        return ", ".join(
             a.get("name", "")
-            for a in (track.get("artists") or [])
+            for a in (entry.get("artists") or [])
             if (a.get("name") or "").strip().lower() not in {"various", "various artists"}
-        ]
-        artist_str = ", ".join(track_artists) if track_artists else top_artist_str
-        tracklist.append({
-            "position": track.get("position") or "",
-            "title":    track_title,
-            "artist":   artist_str,
+        )
+
+    raw: list[dict] = []
+    for track in (data.get("tracklist") or []):
+        artist_str = credited(track) or top_artist_str
+        raw.append({
+            "position":   track.get("position") or "",
+            "title":      track.get("title") or "",
+            "duration":   track.get("duration") or "",
+            "type":       track.get("type_") or "track",
+            "artist":     artist_str,
+            "sub_tracks": [{"position": st.get("position") or "",
+                            "title":    st.get("title") or "",
+                            "duration": st.get("duration") or "",
+                            "artist":   credited(st) or artist_str}
+                           for st in (track.get("sub_tracks") or [])],
         })
+    tracklist = playable_tracks(raw)
 
     return {
         "labels":    labels,
@@ -416,6 +448,8 @@ def get_release_details(release_id: str) -> dict:
         "year":      int(year) if isinstance(year, int) else None,
         "videos":    videos,
         "tracklist": tracklist,
+        "master_id": str(data["master_id"]) if data.get("master_id") else None,
+        "format_descriptions": [d for f in data.get("formats") or [] for d in (f.get("descriptions") or [])],
     }
 
 
@@ -473,6 +507,8 @@ def get_master_artist_list(
             try:
                 data = _safe_get(f"{API_BASE}/releases/{_id_path(rid)}")
             except Exception:
+                continue
+            if not _is_original(rid, data.get("master_id")):
                 continue
 
             top_level = data.get("artists") or []
@@ -607,6 +643,8 @@ def get_master_label_rows(
             except Exception:
                 # Non-fatal: skip inaccessible releases rather than aborting.
                 continue
+            if rel.get("type") != "master" and not _is_original(rid, details["master_id"]):
+                continue
 
             effective_year = details["year"] or (
                 int(year_raw) if isinstance(year_raw, int) else None
@@ -692,10 +730,13 @@ def get_catalog_videos(
         min_year:     Skip releases before this year.
         max_year:     Skip releases after this year.
 
+    Only original releases are kept (no master, or the master's main release).
+
     Returns:
         List of dicts with keys:
-            release_id, release_title, artist_name, year,
-            videos (list of {url, title}), label_name
+            release_id, release_title, artist_name, year, master_id (str|None),
+            format_descriptions (list[str]), videos [{url, title}],
+            tracklist [{position, title, artist, duration}], label_name
     """
     if entity_type == "label":
         url = f"{API_BASE}/labels/{_id_path(entity_id)}/releases"
@@ -718,6 +759,8 @@ def get_catalog_videos(
         try:
             details = get_release_details(str(rid))
         except Exception:
+            continue
+        if rel.get("type") != "master" and not _is_original(rid, details["master_id"]):
             continue
 
         effective_year = details["year"] or (
@@ -750,6 +793,8 @@ def get_catalog_videos(
             "year":          effective_year,
             "videos":        details["videos"],
             "tracklist":     details["tracklist"],
+            "master_id":     details["master_id"],
+            "format_descriptions": details["format_descriptions"],
             "label_name":    label_name,
         })
 

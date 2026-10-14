@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import BinaryIO
 
-from .build import build_snapshot, read_meta, shrunken_tables
+from .build import SCHEMA_VERSION, build_snapshot, read_meta, shrunken_tables
 from .download import KINDS, HttpSource, dated_filename, sha256_file
 from .parse import parse_xml
 
@@ -97,7 +97,8 @@ def run_update(db_dir: Path, source: HttpSource, date: str | None = None, force:
         if limit is not None and live_full:
             raise UpdateError(f"{live.name} is a full database; a --limit build would replace it "
                               "(use --force, or --db-path for a separate directory)")
-        if limit is None and live_full and live_meta["db_date"] == db_date:
+        if (limit is None and live_full and live_meta["db_date"] == db_date
+                and live_meta.get("schema_version") == SCHEMA_VERSION):
             log.info("database already at version %s: %s", db_date, live)
             return live
 

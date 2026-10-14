@@ -16,6 +16,7 @@ def test_release_counts(staging):
     assert len(rows(staging, "artists")) == 225
     assert len(rows(staging, "labels")) == 31
     assert len(rows(staging, "masters")) == 18
+    assert rows(staging, "sub_tracks") == []
 
 
 def test_release_fields(staging):
@@ -87,6 +88,20 @@ def test_masterless_release_has_null_master():
     assert r["master_id"] is None
     assert r["is_main_release"] is None
     assert r["year"] is None
+
+
+def test_sub_tracks_parsed(tmp_path):
+    xml = b"""<releases><release id="7"><title>T</title><tracklist>
+    <track><position>A</position><title>Heading</title><duration></duration></track>
+    <track><position></position><title>Suite</title><duration></duration>
+    <sub_tracks><track><position>1a</position><title>Part One</title><duration>3:00</duration></track>
+    <track><position>1b</position><title>Part Two</title><duration></duration></track></sub_tracks></track>
+    </tracklist></release></releases>"""
+    parse_xml("releases", io.BytesIO(xml), tmp_path)
+    tracks = pq.read_table(tmp_path / "tracks.parquet").to_pylist()
+    assert [t["seq"] for t in tracks] == [0, 1]
+    subs = [tuple(r.values()) for r in pq.read_table(tmp_path / "sub_tracks.parquet").to_pylist()]
+    assert subs == [(7, 1, 0, "1a", "Part One", "3:00"), (7, 1, 1, "1b", "Part Two", None)]
 
 
 def test_limit_stops_early(tmp_path, source_dir):

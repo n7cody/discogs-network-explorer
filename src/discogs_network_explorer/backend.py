@@ -615,7 +615,7 @@ def get_master_label_rows(
             for lab in details["labels"]:
                 lid = lab["id"]
 
-                if (lab.get("name") or "").startswith("Not On Label"):
+                if (lab.get("name") or "").lower().startswith("not on label"):
                     continue
 
                 # Pre-screen each newly-encountered non-seed label by its

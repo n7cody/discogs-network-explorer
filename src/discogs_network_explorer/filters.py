@@ -233,19 +233,13 @@ def apply_label_only_mode(
     df: pd.DataFrame,
     seed_label_ids: Iterable[str],
     min_overlaps_required: int = 2,
-    strict_per_label: bool = False,
     seed_artist_pool: set[str] | None = None,
 ) -> pd.DataFrame:
     """
     Filter to labels that share artists with the seed label union.
 
-    Union mode (default):
-        Keep labels L where |artists(L) ∩ union_seed_artists| >= min_overlaps_required.
-
-    Strict mode (strict_per_label=True):
-        Additionally require that for EVERY seed label S with artists,
-        |artists(L) ∩ artists(S)| >= 1.  This ensures L has cross-label
-        presence across all seed labels, not just one.
+    Keep labels L where |artists(L) ∩ union_seed_artists| >= min_overlaps_required.
+    Overlap with each input separately is filter_by_input_overlap.
 
     seed_artist_pool:
         The authoritative Phase 1 artist set (all artists discovered from
@@ -270,11 +264,6 @@ def apply_label_only_mode(
             seed_pools_union |= l2a.get(lid, set())
         union_pool = seed_pools_union
 
-    # Per-seed-label pools for strict mode (still from df rows).
-    seed_pools: dict[str, set[str]] = {
-        lid: l2a.get(lid, set()) for lid in seed_label_ids
-    }
-
     if not union_pool:
         return df
 
@@ -284,13 +273,7 @@ def apply_label_only_mode(
         artists = l2a.get(label_id, set())
         if not artists:
             return False
-        if len(artists & union_pool) < min_overlaps_required:
-            return False
-        if strict_per_label:
-            for pool in seed_pools.values():
-                if pool and not artists & pool:
-                    return False
-        return True
+        return len(artists & union_pool) >= min_overlaps_required
 
     return df[df["label_id"].astype(str).map(_keep)].copy()
 
@@ -456,3 +439,88 @@ def filter_by_min_artist_releases(
 
     qualifying = counts[counts >= int(min_releases)].index
     return df[df["artist_id"].isin(qualifying)].copy()
+
+
+# DJ MIXES
+
+def exclude_dj_mixes(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Drop rows for releases described as "Mixed" (DJ mixes, mix podcasts).
+
+    Reads 'format_descriptions' when present (local database), otherwise the
+    API's 'format' string, which carries the descriptions.
+    """
+    col = "format_descriptions" if "format_descriptions" in df.columns else "format"
+    if col not in df.columns:
+        return df
+    mixed = df[col].fillna("").astype(str).map(
+        lambda cell: any(t.strip().lower() == "mixed" for t in cell.split(","))
+    )
+    return df[~mixed].copy()
+
+
+# INPUT OVERLAP
+
+def input_artist_pools(
+    df_raw: pd.DataFrame,
+    seed_label_ids: Iterable[str],
+    seed_artist_ids: Iterable[str],
+    artist_pool: set[str],
+) -> dict[str, set[str]]:
+    """
+    {input_id: pool artists} per input.
+
+    Each input label's pool is the pool artists with rows on it in df_raw.
+    Without input labels (Artists Only), each input artist is its own input.
+    """
+    seed_label_ids = [str(x) for x in seed_label_ids if str(x).strip()]
+    if not seed_label_ids:
+        return {str(a): {str(a)} for a in seed_artist_ids if str(a).strip()}
+    l2a = _label_to_artists_from_df(df_raw)
+    return {lid: l2a.get(lid, set()) & artist_pool for lid in seed_label_ids}
+
+
+def input_overlap(
+    df: pd.DataFrame,
+    pools: dict[str, set[str]],
+) -> pd.DataFrame:
+    """
+    Per label in df: inputs_reached and weighted_overlap_pct.
+
+    inputs_reached       — inputs sharing at least one artist with the label.
+    weighted_overlap_pct — share of each input's artists found on the label,
+                           averaged over inputs, so a large input does not
+                           outweigh a small one.
+    """
+    cols = ["label_id", "inputs_reached", "weighted_overlap_pct"]
+    pools = {k: v for k, v in pools.items() if v}
+    if df.empty or not pools:
+        return pd.DataFrame(columns=cols)
+    rows = []
+    for lid, artists in _label_to_artists_from_df(df).items():
+        shares = [len(artists & p) / len(p) for p in pools.values()]
+        rows.append({
+            "label_id": lid,
+            "inputs_reached": sum(s > 0 for s in shares),
+            "weighted_overlap_pct": 100 * sum(shares) / len(shares),
+        })
+    return pd.DataFrame(rows, columns=cols)
+
+
+def filter_by_input_overlap(
+    df: pd.DataFrame,
+    pools: dict[str, set[str]],
+    min_inputs_reached: int = 0,
+    min_weighted_pct: float = 0.0,
+    keep_label_ids: Iterable[str] = (),
+) -> pd.DataFrame:
+    """Keep labels meeting both minimums; labels in keep_label_ids always stay."""
+    if df.empty or (min_inputs_reached <= 1 and min_weighted_pct <= 0):
+        return df
+    ov = input_overlap(df, pools)
+    passing = set(ov.loc[
+        (ov["inputs_reached"] >= min_inputs_reached)
+        & (ov["weighted_overlap_pct"] >= min_weighted_pct),
+        "label_id",
+    ]) | {str(x) for x in keep_label_ids}
+    return df[df["label_id"].astype(str).isin(passing)].copy()

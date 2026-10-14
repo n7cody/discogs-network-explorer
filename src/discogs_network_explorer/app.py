@@ -47,22 +47,31 @@ import streamlit as st
 from dotenv import dotenv_values
 
 from discogs_network_explorer.backends import get_backend, snapshot_available
-from discogs_network_explorer.playlist import MAX_ITEMS as PLAYLIST_MAX_ITEMS, mix_catalogs
+from discogs_network_explorer.playlist import (
+    APPLE_MAX_ITEMS,
+    YOUTUBE_MAX_ITEMS,
+    fill_limit,
+    mix_catalogs,
+)
 from discogs_network_explorer.ingest.build import read_meta
 from discogs_network_explorer.filters import (
     apply_artists_only_mode,
     apply_label_only_mode,
     apply_label_plus_artist_mode,
+    exclude_dj_mixes,
     filter_artists_by_activity_window,
     filter_by_country,
     filter_by_format,
     filter_by_genres,
+    filter_by_input_overlap,
     filter_by_min_artist_releases,
     filter_by_role,
     filter_by_styles,
     filter_by_year_range,
     filter_labels_by_activity_window,
     filter_labels_by_size,
+    input_artist_pools,
+    input_overlap,
     unique_labels,
 )
 from discogs_network_explorer.graph_utils import (
@@ -424,7 +433,6 @@ if activity_window_on:
 
 # Mode A / C overlap controls
 min_overlaps_required: int = 2
-strict_per_label: bool = False
 artist_min_overlaps: int = 2
 
 if seed_mode == "Labels Only":
@@ -438,13 +446,6 @@ if seed_mode == "Labels Only":
         step=1,
         help="A discovered label must share at least this many artists with "
              "the combined pool of all input labels.",
-    )
-    strict_per_label = st.sidebar.checkbox(
-        "Strict mode — require overlap with every input label",
-        value=False,
-        help="When enabled, a discovered label must share at least one artist "
-             "with each individual input label (in addition to the union "
-             "overlap threshold above).",
     )
 
 elif seed_mode == "Artists Only":
@@ -558,8 +559,8 @@ if run_btn:
     all_label_ids = list(df_raw["label_id"].astype(str).unique())
     label_years_map: dict[str, dict[str, int | None]] = {}
     label_counts_map: dict[str, int] = {}
-    # Label Concentration: share of a label's artists (all years) that are pool artists.
-    label_conc_map: dict[str, float] = {}
+    # Label overlap: share of a label's artists (all years) that are pool artists.
+    label_overlap_map: dict[str, float] = {}
     if data_source == "snapshot":
         _pool_per_label = df_raw.groupby(df_raw["label_id"].astype(str))["artist_id"].nunique()
         for _stat in B.get_label_stats(all_label_ids + [str(s) for s in seed_label_ids]):
@@ -569,7 +570,7 @@ if run_btn:
             }
             label_counts_map[_stat["label_id"]] = _stat["catalog_size"] or 0
             if _stat["n_artists"]:
-                label_conc_map[_stat["label_id"]] = (
+                label_overlap_map[_stat["label_id"]] = (
                     100 * int(_pool_per_label.get(_stat["label_id"], 0)) / _stat["n_artists"]
                 )
     else:
@@ -594,7 +595,7 @@ if run_btn:
     st.session_state["seed_mode_used"]      = seed_mode
     st.session_state["label_years"]         = label_years_map
     st.session_state["label_counts"]        = label_counts_map
-    st.session_state["label_concentration"] = label_conc_map
+    st.session_state["label_overlap"] = label_overlap_map
     st.session_state["source_used"]         = data_source
     st.session_state["source_desc_used"]    = _source_desc
     st.session_state["fetch_years_used"]    = (fetch_year_min, fetch_year_max)
@@ -629,7 +630,7 @@ _label_counts_cache: dict[str, int] = st.session_state.get("label_counts", {})
 # Lookups after the crawl use the source the crawl used.
 _source_used: str = st.session_state.get("source_used", "api")
 B_used = get_backend(_source_used)
-_label_conc: dict[str, float] = st.session_state.get("label_concentration", {})
+_label_overlap: dict[str, float] = st.session_state.get("label_overlap", {})
 _source_desc_used: str = st.session_state.get("source_desc_used", "Discogs API")
 _fetch_min_used, _fetch_max_used = st.session_state.get(
     "fetch_years_used", (1900, CURRENT_YEAR)
@@ -722,15 +723,39 @@ selected_styles: list[str] = st.sidebar.multiselect(
     help="Leave empty to include all styles.",
 )
 
-# Label Concentration needs each label's full artist count, known only locally.
-min_concentration: float = 0.0
+exclude_mixes: bool = st.sidebar.checkbox(
+    "Exclude DJ mixes",
+    value=True,
+    help="Leave out releases described as Mixed (DJ mixes, mix podcasts). "
+         "Tracks played in a mix do not link labels.",
+)
+
+# Label overlap needs each label's full artist count, known only locally.
+min_label_overlap: float = 0.0
 if _source_used == "snapshot":
-    min_concentration = st.sidebar.number_input(
-        "Min label concentration (%)",
+    min_label_overlap = st.sidebar.number_input(
+        "Min label overlap (%)",
         min_value=0.0, max_value=100.0, value=0.0, step=0.5,
-        help="Share of a label's artists (all years) that are in your artist pool. "
-             "Large labels that host many unrelated artists score low, often under 2%. "
-             "0 = no minimum.",
+        help="Artist overlap from the label's side: the share of the label's artists "
+             "(all years) who are in your input artist pool. Large labels that host "
+             "many unrelated artists score low, often under 2%. 0 = no minimum.",
+    )
+
+min_weighted_overlap: float = st.sidebar.number_input(
+    "Min weighted overlap (%)",
+    min_value=0.0, max_value=100.0, value=0.0, step=0.5,
+    help="Artist overlap from the inputs' side: the share of each input's artists "
+         "found on the label, averaged across inputs so a large input does not "
+         "outweigh a small one. 0 = no minimum.",
+)
+
+_input_pools = input_artist_pools(df_raw, _seed_labels_used, _seed_artists_used, _artists)
+min_inputs_reached: int = 1
+if len(_input_pools) > 1:
+    min_inputs_reached = st.sidebar.number_input(
+        "Min inputs reached",
+        min_value=1, max_value=len(_input_pools), value=1, step=1,
+        help="Number of inputs that share at least one artist with the label.",
     )
 
 catalog_cap_on: bool = False
@@ -798,14 +823,16 @@ if selected_genres:
     df = filter_by_genres(df, set(selected_genres))
 if selected_styles:
     df = filter_by_styles(df, set(selected_styles))
-if min_concentration > 0 and not df.empty:
+if exclude_mixes:
+    df = exclude_dj_mixes(df)
+if min_label_overlap > 0 and not df.empty:
     _seed_set = {str(s) for s in _seed_labels_used}
-    _low_conc = {
+    _low_overlap = {
         lid for lid in df["label_id"].astype(str).unique()
-        if lid not in _seed_set and _label_conc.get(lid, 100.0) < min_concentration
+        if lid not in _seed_set and _label_overlap.get(lid, 100.0) < min_label_overlap
     }
-    if _low_conc:
-        df = df[~df["label_id"].astype(str).isin(_low_conc)].copy()
+    if _low_overlap:
+        df = df[~df["label_id"].astype(str).isin(_low_overlap)].copy()
 
 
 # Mode-specific overlap filter — run BEFORE activity window so that
@@ -816,7 +843,6 @@ if _seed_mode_used == "Labels Only":
         df,
         seed_label_ids=_seed_labels_used,
         min_overlaps_required=min_overlaps_required,
-        strict_per_label=strict_per_label,
         seed_artist_pool=_artists,
     )
 elif _seed_mode_used == "Labels + Artists":
@@ -831,6 +857,13 @@ elif _seed_mode_used == "Artists Only":
         seed_artist_ids=_seed_artists_used,
         min_overlaps_required=artist_min_overlaps,
     )
+
+df = filter_by_input_overlap(
+    df, _input_pools,
+    min_inputs_reached=min_inputs_reached,
+    min_weighted_pct=min_weighted_overlap,
+    keep_label_ids=[str(s) for s in _seed_labels_used],
+)
 
 # Catalog-size cap: excluded labels are kept for the expander and excluded_labels.csv.
 _excluded_labels: pd.DataFrame | None = None
@@ -918,14 +951,14 @@ for _sid in [str(s) for s in (_seed_labels_used or [])]:
     if _sid not in _label_years:
         _label_years[_sid] = _all_label_years.get(_sid, {"earliest": None, "latest": None})
 
-# Collect total release counts for labels surviving filters (used for graph halo sizing).
-_label_release_counts: dict[str, int] = {
-    _lid: _release_count(_lid)
-    for _lid in df["label_id"].astype(str).unique()
-}
-for _sid in [str(s) for s in (_seed_labels_used or [])]:
-    if _sid not in _label_release_counts:
-        _label_release_counts[_sid] = _release_count(_sid)
+# Weighted overlap and inputs reached for labels surviving filters.
+_overlap_table = input_overlap(df, _input_pools)
+_weighted_overlap: dict[str, float] = dict(
+    zip(_overlap_table["label_id"], _overlap_table["weighted_overlap_pct"])
+)
+_inputs_reached: dict[str, int] = dict(
+    zip(_overlap_table["label_id"], _overlap_table["inputs_reached"])
+)
 
 if df.empty:
     st.warning(
@@ -954,16 +987,18 @@ def _build_csv_outputs(
     seed_mode_used: str,
     label_names: dict[str, str],
     params: dict,
+    input_pools: dict[str, set[str]],
     label_years: dict[str, dict[str, int | None]] | None = None,
-    label_concentration: dict[str, float] | None = None,
+    label_overlap: dict[str, float] | None = None,
 ) -> dict[str, str]:
     """
     Build 3 CSV outputs and return as {filename: csv_string}.
 
     input_info.csv        — input labels, search parameters, discovered artists.
     all_releases.csv      — every crawled release row with resolved artist names.
-    discovered_labels.csv — one row per label with artist overlap, year data,
-                            and per-seed-label artist breakdown columns.
+    discovered_labels.csv — one row per label surviving the filters (and each
+                            input label) with artist overlap, year data and
+                            per-input artist columns, by weighted overlap.
     """
     artist_name_map: dict[str, str] = {}
     for aid in list(artists):
@@ -1003,10 +1038,12 @@ def _build_csv_outputs(
             "value": artist_name_map.get(aid, f"artist_{aid}"),
         })
 
-    # Discovered Labels
+    # Discovered Labels: labels surviving the filters, plus every input label
+    seed_set = set(seed_label_ids_used)
+    label_rows = pd.concat([df_results, df_raw[df_raw["label_id"].astype(str).isin(seed_set)]])
     label_id_to_name: dict[str, str] = {}
     l2a_names: dict[str, dict[str, str]] = {}
-    for rec in df_raw.to_dict("records"):
+    for rec in label_rows.to_dict("records"):
         lid   = str(rec.get("label_id", "")).strip()
         lname = str(rec.get("label_name", "")).strip()
         aid   = str(rec.get("artist_id", "")).strip()
@@ -1016,44 +1053,37 @@ def _build_csv_outputs(
         if aid in artists:
             l2a_names.setdefault(lid, {})[aid] = artist_name_map.get(aid, f"artist_{aid}")
 
-    seed_aid_sets: dict[str, set[str]] = {}
-    for rec in df_raw.to_dict("records"):
-        lid = str(rec.get("label_id", "")).strip()
-        aid = str(rec.get("artist_id", "")).strip()
-        if lid in set(seed_label_ids_used) and aid in artists:
-            seed_aid_sets.setdefault(lid, set()).add(aid)
+    overlap = input_overlap(label_rows, input_pools).set_index("label_id")
 
     label_summary_rows: list[dict] = []
-    for lid, aid_map in sorted(l2a_names.items(), key=lambda x: len(x[1]), reverse=True):
-        artist_list = ", ".join(sorted(set(aid_map.values())))
-        n_artists = len(aid_map)
-        releases = _release_count(lid)
-        overlap_ratio = round(releases / n_artists, 2) if n_artists > 0 else 0.0
+    for lid, aid_map in l2a_names.items():
         yrs = (label_years or {}).get(lid, {})
         row_dict: dict = {
             "label_name":    label_id_to_name.get(lid, lid),
             "label_id":      lid,
-            "releases":      releases,
-            "artist_n":      n_artists,
-            "artists":       artist_list,
-            "overlap_ratio": overlap_ratio,
-            "earliest_year": yrs.get("earliest", ""),
-            "latest_year":   yrs.get("latest", ""),
+            "releases":      _release_count(lid),
+            "artist_n":      len(aid_map),
+            "artists":       ", ".join(sorted(set(aid_map.values()))),
+            "inputs_reached":       int(overlap["inputs_reached"].get(lid, 0)),
+            "weighted_overlap_pct": round(float(overlap["weighted_overlap_pct"].get(lid, 0.0)), 2),
         }
-        if label_concentration is not None:
-            _conc = label_concentration.get(lid)
-            row_dict["concentration_pct"] = round(_conc, 2) if _conc is not None else ""
+        if label_overlap is not None:
+            _lo = label_overlap.get(lid)
+            row_dict["label_overlap_pct"] = round(_lo, 2) if _lo is not None else ""
+        row_dict["earliest_year"] = yrs.get("earliest", "")
+        row_dict["latest_year"]   = yrs.get("latest", "")
         disc_artist_ids = set(aid_map.keys())
         for slid in seed_label_ids_used:
             seed_name = label_names.get(slid, slid)
             col_name = f"{seed_name}_artists"
-            overlap = disc_artist_ids & seed_aid_sets.get(slid, set())
-            if overlap:
-                names = sorted(set(artist_name_map.get(a, f"artist_{a}") for a in overlap))
-                row_dict[col_name] = f"[total={len(overlap)}] " + ", ".join(names)
+            shared = disc_artist_ids & input_pools.get(slid, set())
+            if shared:
+                names = sorted(set(artist_name_map.get(a, f"artist_{a}") for a in shared))
+                row_dict[col_name] = f"[total={len(shared)}] " + ", ".join(names)
             else:
                 row_dict[col_name] = ""
         label_summary_rows.append(row_dict)
+    label_summary_rows.sort(key=lambda r: (-r["weighted_overlap_pct"], -r["artist_n"]))
 
     # All Releases
     df_raw_out = df_raw.copy()
@@ -1119,7 +1149,7 @@ with tab_results:
             _caps_params = {
                 "release_caps":                "no caps",
                 "originals_only":              st.session_state.get("originals_used", False),
-                "min_label_concentration_pct": min_concentration or "off",
+                "min_label_overlap_pct":       min_label_overlap or "off",
                 "catalog_size_cap":            max_catalog_size if catalog_cap_on else "off",
             }
         else:
@@ -1134,6 +1164,9 @@ with tab_results:
             "fetch_year_min":          _fetch_min_used,
             "fetch_year_max":          _fetch_max_used,
             **_caps_params,
+            "exclude_dj_mixes":        exclude_mixes,
+            "min_weighted_overlap_pct": min_weighted_overlap or "off",
+            "min_inputs_reached":      min_inputs_reached,
             "min_releases_per_label":  min_releases_per_label or "no minimum",
             "min_releases_per_artist": min_releases_per_artist or "no minimum",
             "activity_window": (
@@ -1157,8 +1190,9 @@ with tab_results:
             seed_mode_used=_seed_mode_used,
             label_names=_label_names,
             params=_export_params,
+            input_pools=_input_pools,
             label_years=_label_years,
-            label_concentration=_label_conc if _source_used == "snapshot" else None,
+            label_overlap=_label_overlap if _source_used == "snapshot" else None,
         )
         if _excluded_labels is not None:
             _csv_outputs["excluded_labels.csv"] = csv_safe(_excluded_labels).to_csv(index=False)
@@ -1174,12 +1208,16 @@ with tab_results:
         )
 
     with col_right:
-        st.subheader("Unique labels (top 100)")
+        st.subheader("Labels by weighted overlap (top 100)")
         _labels_table = unique_labels(df)
+        _lt_ids = _labels_table["label_id"].astype(str)
+        _labels_table["inputs_reached"] = _lt_ids.map(_inputs_reached)
+        _labels_table["weighted_overlap_pct"] = _lt_ids.map(_weighted_overlap).round(2)
         if _source_used == "snapshot":
-            _labels_table["concentration_pct"] = (
-                _labels_table["label_id"].astype(str).map(_label_conc).round(2)
-            )
+            _labels_table["label_overlap_pct"] = _lt_ids.map(_label_overlap).round(2)
+        _labels_table = _labels_table.sort_values(
+            ["weighted_overlap_pct", "n"], ascending=False, na_position="last",
+        ).reset_index(drop=True)
         st.dataframe(_labels_table.head(100), use_container_width=True)
 
     if _excluded_labels is not None:
@@ -1230,7 +1268,8 @@ with tab_graph:
             seed_label_ids=_seed_ids,
             seed_artist_union=_artists,  # authoritative pool from Phase 1 crawl
             label_years=_label_years,
-            label_release_counts=_label_release_counts,
+            label_overlap=_label_overlap if _source_used == "snapshot" else None,
+            weighted_overlap=_weighted_overlap,
         )
     else:
         G = build_artist_label_graph(
@@ -1246,26 +1285,38 @@ with tab_graph:
             "other filters."
         )
     else:
-        draw_graph_matplotlib(G, ax=ax)
+        _name_texts = draw_graph_matplotlib(G, ax=ax)
 
+        # Both versions share one layout and one frame so toggling only swaps the names.
+        _frame = fig.get_tightbbox(fig.canvas.get_renderer()).padded(0.1)
         _graph_buf = io.BytesIO()
-        fig.savefig(_graph_buf, format="png", bbox_inches="tight", dpi=150)
-        _graph_png_bytes = _graph_buf.getvalue()
-        st.session_state["graph_png"] = _graph_png_bytes
+        fig.savefig(_graph_buf, format="png", bbox_inches=_frame, dpi=150)
+        for _t in _name_texts:
+            _t.set_visible(False)
+        _graph_bare_buf = io.BytesIO()
+        fig.savefig(_graph_bare_buf, format="png", bbox_inches=_frame, dpi=150)
+        plt.close(fig)
+        st.session_state["graph_png"] = _graph_buf.getvalue()
+        st.session_state["graph_png_no_names"] = _graph_bare_buf.getvalue()
 
-        st.pyplot(fig, clear_figure=True)
+        _show_names = st.toggle("Show names", value=True, key="graph_show_names")
+        _graph_png_bytes = (
+            st.session_state["graph_png"] if _show_names
+            else st.session_state["graph_png_no_names"]
+        )
+        st.image(_graph_png_bytes, width="stretch")
 
         st.download_button(
             "Download graph as PNG",
             data=_graph_png_bytes,
-            file_name="discogs_graph.png",
+            file_name="discogs_graph.png" if _show_names else "discogs_graph_no_names.png",
             mime="image/png",
         )
 
     st.caption(
         f"Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges.  \n"
-        f"Node size = artist count from input labels · Fill = latest year · Border = earliest year · "
-        f"Halo = overlap ratio (releases / artists)"
+        f"Node size = weighted overlap · Fill = latest year · Border = earliest year"
+        + (" · Halo = low label overlap (larger ring = lower %)" if _source_used == "snapshot" else "")
     )
 
 
@@ -1301,7 +1352,8 @@ with tab_report:
                 seed_label_ids=_rep_seed_ids,
                 seed_artist_union=_artists,
                 label_years=_label_years,
-                label_release_counts=_label_release_counts,
+                label_overlap=_label_overlap if _source_used == "snapshot" else None,
+                weighted_overlap=_weighted_overlap,
             )
         else:
             _G = build_artist_label_graph(
@@ -1320,6 +1372,8 @@ with tab_report:
     _report_zip_buf = io.BytesIO()
     with zipfile.ZipFile(_report_zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("graph.png", _report_png)
+        if st.session_state.get("graph_png_no_names"):
+            zf.writestr("graph_no_names.png", st.session_state["graph_png_no_names"])
         for _fname, _content in _csv_outputs.items():
             zf.writestr(_fname, _content)
 
@@ -1550,7 +1604,8 @@ else:
 
 st.caption(
     f"The playlist takes the newest release from each input in turn, "
-    f"up to {PLAYLIST_MAX_ITEMS} items."
+    f"up to {YOUTUBE_MAX_ITEMS} YouTube items and {APPLE_MAX_ITEMS} Apple Music items. "
+    f"Apple+YT fills to {APPLE_MAX_ITEMS}; YouTube fallback stops at {YOUTUBE_MAX_ITEMS}."
 )
 
 dnx_max_releases: int = 30
@@ -1703,7 +1758,7 @@ if st.button(_btn_labels[dnx_platform], type="primary"):
             text=f"Fetching catalogs… {eidx + 1}/{len(entity_ids)}",
         )
     progress.empty()
-    all_releases: list[dict] = mix_catalogs(catalogs, max_items=PLAYLIST_MAX_ITEMS)
+    all_releases: list[dict] = mix_catalogs(catalogs, max_items=fill_limit(dnx_platform))
 
     if not all_releases:
         st.warning("No releases found. Check the IDs and year range.")
@@ -1922,13 +1977,38 @@ if st.button(_btn_labels[dnx_platform], type="primary"):
                 if rid not in _covered_rids:
                     _yt_search_remaining.append(item)
 
+        # YouTube fallback is held to YOUTUBE_MAX_ITEMS; Apple Music is not.
+        for v in video_queue[YOUTUBE_MAX_ITEMS:]:
+            unobtained.append({
+                "artist": v["artist"],
+                "track": v["title"],
+                "release": v["release"],
+                "label": v["label"],
+                "reason": "youtube_limit",
+                "discogs_url": f"https://www.discogs.com/release/{v['rid']}",
+            })
+        video_queue = video_queue[:YOUTUBE_MAX_ITEMS]
+        _yt_budget = YOUTUBE_MAX_ITEMS - len(video_queue)
+
         if video_queue:
             st.info(f"Found **{len(video_queue)}** Discogs video embeds for YouTube playlist.")
 
         if dnx_search_fallback and _yt_search_remaining:
             yt_service = get_youtube_service(_yt_creds)
             progress = st.progress(0, text="Searching YouTube for remaining tracks…")
+            _yt_found = 0
             for idx, item in enumerate(_yt_search_remaining):
+                if _yt_found >= _yt_budget:
+                    for rest in _yt_search_remaining[idx:]:
+                        unobtained.append({
+                            "artist": rest["artist"],
+                            "track": rest["title"],
+                            "release": rest["release"],
+                            "label": rest["label"],
+                            "reason": "youtube_limit",
+                            "discogs_url": f"https://www.discogs.com/release/{rest['rid']}",
+                        })
+                    break
                 query = f"{item['artist']} - {item['title']}"
                 _search_error = False
                 try:
@@ -1959,8 +2039,10 @@ if st.button(_btn_labels[dnx_platform], type="primary"):
                     }
                     if verdict == "accept":
                         accepted_from_search.append(entry)
+                        _yt_found += 1
                     elif verdict == "borderline":
                         borderline_from_search.append(entry)
+                        _yt_found += 1
                     else:
                         rejected_from_search.append(entry)
                 else:

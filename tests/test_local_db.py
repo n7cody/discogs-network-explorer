@@ -35,10 +35,10 @@ def test_seed_window_limits_seed_releases():
         "1337924", "1499243"]
 
 
-def test_track_artists_count_only_on_various_artists_releases():
-    # 787103 is only a Track Artist on 1345585 (not VA); it enters at 1409908 (Main)
+def test_track_artists_count_except_on_dj_mixes():
+    # 787103 is a Track Artist on 1345585 (not VA, not a mix): it enters there, before 1409908
     pool = local_db.get_master_artist_list([SEED], min_year=2008, max_year=2008)
-    assert pool[:6] == ["3184", "479460", "479461", "819406", "1069536", "787103"]
+    assert pool[:6] == ["3184", "479460", "479461", "787103", "819406", "1069536"]
     # Release 3 is a DJ mix by one Main Artist with 15 Track Artists and 3 remixers
     assert local_db.get_master_artist_list(["6"]) == ["3", "8", "14", "23"]
 

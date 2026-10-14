@@ -64,10 +64,14 @@ def build_label_label_graph(
     seed_label_ids: list[str] | None = None,
     seed_artist_union: set[str] | None = None,
     label_years: dict[str, dict[str, int | None]] | None = None,
-    label_release_counts: dict[str, int] | None = None,
+    label_overlap: dict[str, float] | None = None,
+    weighted_overlap: dict[str, float] | None = None,
 ) -> nx.Graph:
     """
     Build a label-label graph where edges represent shared artist presence.
+
+    label_overlap (label_overlap_pct) sets the halo; weighted_overlap
+    (weighted_overlap_pct) sets node size when given.
     """
     G: nx.Graph = nx.Graph()
 
@@ -103,19 +107,17 @@ def build_label_label_graph(
         label_artists = effective_l2a[L]
 
         n_seed_artists = len(label_artists & seed_union) if seed_union else 0
-        releases = (label_release_counts or {}).get(L, 0)
-        overlap_ratio = (releases / n_seed_artists) if n_seed_artists > 0 else 0.0
 
         yrs = (label_years or {}).get(L, {})
         label_attrs[L] = {
             "kind":            "label",
             "display":         display,
-            "overlap_ratio":   round(overlap_ratio, 2),
             "n_seed_artists":  n_seed_artists,
+            "label_overlap_pct":    (label_overlap or {}).get(L),
+            "weighted_overlap_pct": (weighted_overlap or {}).get(L),
             "is_seed":         is_seed,
             "earliest_year":   yrs.get("earliest"),
             "latest_year":     yrs.get("latest"),
-            "releases":        releases,
         }
 
     # Second pass: add nodes, then edges only between labels that both passed.
@@ -186,27 +188,23 @@ def build_artist_label_graph(
 
 # RENDERING
 
-def _halo_multiplier(releases: int, n_artists: int) -> float:
-    """Halo size multiplier based on releases-per-artist ratio."""
-    ratio = releases / n_artists if n_artists > 0 else 0
-    if ratio <= 1:
-        return 1.025
-    if ratio <= 2:
+def _halo_multiplier(label_overlap_pct: float | None) -> float | None:
+    """Halo size multiplier: the lower the label overlap, the larger the ring; None = no ring."""
+    if label_overlap_pct is None or label_overlap_pct >= 50:
+        return None
+    if label_overlap_pct >= 10:
         return 2.0
-    if ratio <= 4:
+    if label_overlap_pct >= 5:
         return 5.0
-    if ratio <= 8:
+    if label_overlap_pct >= 2.5:
         return 10.0
-    if ratio <= 16:
-        return 20.0
-    if ratio <= 32:
-        return 35.0
-    return 50.0
+    return 20.0
 
 
-def draw_graph_matplotlib(G: nx.Graph, ax: plt.Axes | None = None) -> None:
+def draw_graph_matplotlib(G: nx.Graph, ax: plt.Axes | None = None) -> list:
     """
     Render a network graph onto a matplotlib Axes using a spring layout.
+    Returns the name text artists so callers can hide them.
     """
     ax = ax or plt.gca()
 
@@ -223,22 +221,27 @@ def draw_graph_matplotlib(G: nx.Graph, ax: plt.Axes | None = None) -> None:
         _year_to_color(G.nodes[n].get("earliest_year")) for n in label_nodes
     ]
 
-    # Power-curve node sizing by n_artists.
+    # Power-curve node sizing by weighted overlap, or shared artist count without it.
     # Exponent < 1 gives concave curve: gentle steps at low counts,
     # diminishing returns at high counts.
     MIN_NODE_SIZE = 38.0
     MAX_NODE_SIZE = 2000.0
     _SIZE_EXPONENT = 0.85
 
-    artist_counts = {
-        n: max(1, G.nodes[n].get("n_seed_artists", 1)) for n in label_nodes
-    }
-    max_n = max(artist_counts.values()) if artist_counts else 1
-    min_n = min(artist_counts.values()) if artist_counts else 1
+    if any(G.nodes[n].get("weighted_overlap_pct") is not None for n in label_nodes):
+        size_metric = {
+            n: G.nodes[n].get("weighted_overlap_pct") or 0.0 for n in label_nodes
+        }
+    else:
+        size_metric = {
+            n: max(1, G.nodes[n].get("n_seed_artists", 1)) for n in label_nodes
+        }
+    max_n = max(size_metric.values()) if size_metric else 1
+    min_n = min(size_metric.values()) if size_metric else 1
 
     node_sizes: dict[str, float] = {}
     for n in label_nodes:
-        count = artist_counts[n]
+        count = size_metric[n]
         if max_n <= min_n:
             frac = 0.0
         else:
@@ -253,7 +256,7 @@ def draw_graph_matplotlib(G: nx.Graph, ax: plt.Axes | None = None) -> None:
 
     label_linewidth = max(2.2, 2.6 - max(0, _n_labels - 6) * 0.0167)
 
-    # Halo: catalog size indicator drawn behind main nodes.
+    # Halo: low label overlap indicator drawn behind main nodes.
     # Minimum gap in points ensures the halo ring is visible even on large
     # nodes where the area-based multiplier produces a sub-pixel radius increase.
     _HALO_ALPHA = 0.55
@@ -262,11 +265,13 @@ def draw_graph_matplotlib(G: nx.Graph, ax: plt.Axes | None = None) -> None:
     _PI = 3.141592653589793
     _halo_r, _halo_g, _halo_b = mcolors.to_rgb(_HALO_COLOR)
     _halo_rgba = (_halo_r, _halo_g, _halo_b, _HALO_ALPHA)
+    halo_nodes = []
     halo_sizes = []
     for i, n in enumerate(label_nodes):
-        n_art = artist_counts[n]
-        releases = G.nodes[n].get("releases", 0)
-        mult = _halo_multiplier(releases, n_art)
+        mult = _halo_multiplier(G.nodes[n].get("label_overlap_pct"))
+        if mult is None:
+            continue
+        halo_nodes.append(n)
         node_s = label_sizes[i]
         node_r = (node_s / _PI) ** 0.5
         halo_r = max(node_r * mult ** 0.5, node_r + _MIN_HALO_GAP)
@@ -277,15 +282,15 @@ def draw_graph_matplotlib(G: nx.Graph, ax: plt.Axes | None = None) -> None:
         node_size=60, node_color="lightblue", ax=ax,
     )
 
-    halo_coll = nx.draw_networkx_nodes(
-        G, pos, nodelist=label_nodes,
-        node_size=halo_sizes,
-        node_color="#ffffff",
-        edgecolors=[_halo_rgba] * len(label_nodes),
-        linewidths=label_linewidth * 0.8,
-        ax=ax,
-    )
-    if halo_coll is not None:
+    if halo_nodes:
+        halo_coll = nx.draw_networkx_nodes(
+            G, pos, nodelist=halo_nodes,
+            node_size=halo_sizes,
+            node_color="#ffffff",
+            edgecolors=[_halo_rgba] * len(halo_nodes),
+            linewidths=label_linewidth * 0.8,
+            ax=ax,
+        )
         halo_coll.set_facecolor("none")
 
     nx.draw_networkx_nodes(
@@ -338,16 +343,18 @@ def draw_graph_matplotlib(G: nx.Graph, ax: plt.Axes | None = None) -> None:
         if n not in seed_display
     }
 
+    name_texts: list = []
     if seed_display:
-        nx.draw_networkx_labels(
+        name_texts += nx.draw_networkx_labels(
             G, pos, labels=seed_display,
             font_size=font_size, font_weight="bold",
             font_color="#3D380C", ax=ax,
-        )
+        ).values()
     if nonseed_display:
-        nx.draw_networkx_labels(
+        name_texts += nx.draw_networkx_labels(
             G, pos, labels=nonseed_display,
             font_size=font_size, ax=ax,
-        )
+        ).values()
 
     ax.set_axis_off()
+    return name_texts

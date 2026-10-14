@@ -149,21 +149,21 @@ def test_originals_toggle_limits_seed_pool(local_app):
     assert len(at.session_state["df_raw"]) == 4
 
 
-# Label Concentration
+# Label overlap
 
-MIN_CONC = "Min label concentration (%)"
+MIN_CONC = "Min label overlap (%)"
 
 
-def test_concentration_column_in_discovered_labels(local_app):
+def test_label_overlap_column_in_discovered_labels(local_app):
     at = _run(local_app, "99137")
     assert not at.exception
     labels = _zip_csvs(at)["discovered_labels.csv"].set_index("label_id")
     # 99137: all 22 of its artists are in the pool; 14057: 2 of its 4
-    assert labels.loc["99137", "concentration_pct"] == 100.0
-    assert labels.loc["14057", "concentration_pct"] == 50.0
+    assert labels.loc["99137", "label_overlap_pct"] == 100.0
+    assert labels.loc["14057", "label_overlap_pct"] == 50.0
 
 
-def test_concentration_filter_off_by_default_and_drops_labels_below(local_app):
+def test_label_overlap_filter_off_by_default_and_drops_labels_below(local_app):
     at = _run(local_app, "99137")
     assert _by_label(at.sidebar.number_input, MIN_CONC).value == 0
     assert "14057" in set(at.session_state["df_raw"]["label_id"])
@@ -174,6 +174,37 @@ def test_concentration_filter_off_by_default_and_drops_labels_below(local_app):
     assert not at.exception
     assert "14057" not in shown()
     assert "99137" in shown()
+
+
+def test_export_follows_filters_and_ranks_by_weighted_overlap(local_app):
+    at = _run(local_app, "99137")
+    labels = _zip_csvs(at)["discovered_labels.csv"]
+    assert "14057" in set(labels["label_id"])
+    assert labels["weighted_overlap_pct"].is_monotonic_decreasing
+    assert labels.set_index("label_id").loc["99137", "weighted_overlap_pct"] == 100.0
+    assert {"inputs_reached", "label_overlap_pct"} <= set(labels.columns)
+    assert "overlap_ratio" not in labels.columns
+
+    _by_label(at.sidebar.number_input, MIN_CONC).set_value(60.0).run()
+    labels = _zip_csvs(at)["discovered_labels.csv"]
+    assert "14057" not in set(labels["label_id"])
+    assert "99137" in set(labels["label_id"])
+
+
+def test_dj_mixes_excluded_by_default(local_app):
+    at = _run(local_app, "99137")
+    assert _by_label(at.sidebar.checkbox, "Exclude DJ mixes").value is True
+    assert _params(at)["exclude_dj_mixes"] == "True"
+
+
+def test_graph_names_toggle_swaps_versions(local_app):
+    at = _run(local_app, "99137")
+    toggle = next(t for t in at.toggle if t.label == "Show names")
+    assert toggle.value is True
+    with_names = at.session_state["graph_png"]
+    toggle.set_value(False).run()
+    assert not at.exception
+    assert at.session_state["graph_png_no_names"] != with_names
 
 
 # Catalog-size cap
@@ -236,14 +267,14 @@ def test_export_records_local_settings(local_app):
     params = _params(at)
     assert params["release_caps"] == "no caps"
     assert params["originals_only"] == "False"
-    assert params["min_label_concentration_pct"] == "off"
+    assert params["min_label_overlap_pct"] == "off"
     assert params["catalog_size_cap"] == "off"
     assert "max_releases_per_artist" not in params
 
     _by_label(at.sidebar.number_input, MIN_CONC).set_value(5.0).run()
     _by_label(at.sidebar.checkbox, CAP_ON).check().run()
     params = _params(at)
-    assert params["min_label_concentration_pct"] == "5.0"
+    assert params["min_label_overlap_pct"] == "5.0"
     assert params["catalog_size_cap"] == "400"
 
 
@@ -276,9 +307,9 @@ def test_api_mode_shows_no_local_only_controls(api_app, stub_api):
     assert at.session_state["source_used"] == "api"
     assert MIN_CONC not in _labels(at.sidebar.number_input)
     assert CAP_ON not in _labels(at.sidebar.checkbox)
-    assert "concentration_pct" not in at.dataframe[1].value.columns
+    assert "label_overlap_pct" not in at.dataframe[1].value.columns
     csvs = _zip_csvs(at)
-    assert "concentration_pct" not in csvs["discovered_labels.csv"].columns
+    assert "label_overlap_pct" not in csvs["discovered_labels.csv"].columns
     assert "excluded_labels.csv" not in csvs
     params = _params(at)
     assert params["max_releases_per_artist"] == "40"

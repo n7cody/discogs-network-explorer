@@ -4,6 +4,7 @@
 
 -- name: seed_pool
 -- Seed Labels -> artist pool, in discovery order (first Seed Release, then artist ID).
+-- Track Artists count except on DJ mixes that are not Various Artists releases.
 -- $seed_label_ids BIGINT[], $min_year, $max_year INTEGER (NULL = open), $originals_only BOOLEAN
 WITH seed_labels AS (
     SELECT DISTINCT unnest($seed_label_ids) AS label_id
@@ -22,12 +23,20 @@ various_artists_releases AS (
     JOIN release_artists ra USING (release_id)
     GROUP BY ra.release_id
     HAVING bool_and(ra.artist_id = 194)
+),
+mixed_releases AS (
+    -- DJ mixes: their Track Artists are the tracks played, not contributors
+    SELECT DISTINCT f.release_id
+    FROM seed_releases
+    JOIN release_formats f USING (release_id)
+    WHERE list_contains(f.descriptions, 'Mixed')
 )
 SELECT CAST(arr.artist_id AS VARCHAR) AS artist_id
 FROM seed_releases
 JOIN artist_release_roles arr USING (release_id)
 WHERE arr.role <> 'Track'
    OR arr.release_id IN (SELECT release_id FROM various_artists_releases)
+   OR arr.release_id NOT IN (SELECT release_id FROM mixed_releases)
 GROUP BY arr.artist_id
 ORDER BY min(arr.release_id), arr.artist_id;
 
@@ -52,7 +61,7 @@ release_label_links AS (
     FROM pool_release_ids
     JOIN release_labels rl USING (release_id)
     WHERE rl.label_id IS NOT NULL
-      AND rl.label_name NOT LIKE 'Not On Label%'
+      AND lower(rl.label_name) NOT LIKE 'not on label%'
     GROUP BY rl.release_id, rl.label_id
 ),
 pool_formats AS (

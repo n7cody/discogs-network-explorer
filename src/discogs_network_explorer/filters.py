@@ -19,6 +19,15 @@ from typing import Iterable
 import pandas as pd
 
 
+def _rows_where(df: pd.DataFrame, mask: pd.Series) -> pd.DataFrame:
+    """Rows where mask is True, keeping every column.
+
+    A mask built with .map/.apply on an empty frame has dtype object, and pandas
+    reads df[<empty object Series>] as a column selection, which drops all columns.
+    """
+    return df.loc[mask.astype(bool)].copy()
+
+
 # GENERIC ROW FILTERS
 
 def filter_by_year_range(
@@ -71,7 +80,7 @@ def filter_by_format(
     mask = df["format"].fillna("").astype(str).map(
         lambda cell: any(t.strip().lower() in lower for t in cell.split(","))
     )
-    return df[mask].copy()
+    return _rows_where(df, mask)
 
 
 def filter_by_country(
@@ -130,7 +139,7 @@ def filter_by_genres(
         return any(tok.strip().lower() in lower for tok in str(cell).split(","))
 
     mask = df["genres"].fillna("").apply(_has_genre)
-    return df[mask].copy()
+    return _rows_where(df, mask)
 
 
 def filter_by_styles(
@@ -153,7 +162,7 @@ def filter_by_styles(
         return any(tok.strip().lower() in lower for tok in str(cell).split(","))
 
     mask = df["styles"].fillna("").apply(_has_style)
-    return df[mask].copy()
+    return _rows_where(df, mask)
 
 
 # LABEL-SIZE FILTER
@@ -275,7 +284,7 @@ def apply_label_only_mode(
             return False
         return len(artists & union_pool) >= min_overlaps_required
 
-    return df[df["label_id"].astype(str).map(_keep)].copy()
+    return _rows_where(df, df["label_id"].astype(str).map(_keep))
 
 
 # MODE B — LABELS + ARTISTS
@@ -315,7 +324,7 @@ def apply_label_plus_artist_mode(
             return False
         return True
 
-    return df[df["label_id"].astype(str).map(_keep)].copy()
+    return _rows_where(df, df["label_id"].astype(str).map(_keep))
 
 
 # MODE C — ARTISTS ONLY
@@ -343,7 +352,7 @@ def apply_artists_only_mode(
     def _keep(label_id: str) -> bool:
         return len(seed_artist_ids & l2a.get(label_id, set())) >= min_n
 
-    return df[df["label_id"].astype(str).map(_keep)].copy()
+    return _rows_where(df, df["label_id"].astype(str).map(_keep))
 
 
 # RELEASE ACTIVITY WINDOW FILTERS
@@ -456,7 +465,7 @@ def exclude_dj_mixes(df: pd.DataFrame) -> pd.DataFrame:
     mixed = df[col].fillna("").astype(str).map(
         lambda cell: any(t.strip().lower() == "mixed" for t in cell.split(","))
     )
-    return df[~mixed].copy()
+    return _rows_where(df, ~mixed.astype(bool))
 
 
 # INPUT OVERLAP

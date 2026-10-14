@@ -1,6 +1,7 @@
 import pandas as pd
 import pytest
 
+from discogs_network_explorer import filters as F
 from discogs_network_explorer.filters import (
     exclude_dj_mixes,
     filter_by_input_overlap,
@@ -53,3 +54,52 @@ def test_filter_by_input_overlap_keeps_inputs():
     assert set(out["label_id"]) == {"A", "B", "Y"}
     out = filter_by_input_overlap(RAW, POOLS, min_weighted_pct=30, keep_label_ids=["A", "B"])
     assert set(out["label_id"]) == {"A", "B", "Y"}
+
+
+# Empty frames keep their columns (pandas reads df[<empty object Series>] as a column selection)
+
+COLS = ["artist_id", "label_id", "label_name", "release_id", "year", "format", "format_descriptions",
+        "country", "role", "genres", "styles"]
+EMPTY = pd.DataFrame({c: pd.Series(dtype=object) for c in COLS})
+
+EMPTY_CASES = {
+    "year": lambda df: F.filter_by_year_range(df, 2000, 2010),
+    "format": lambda df: F.filter_by_format(df, {"Vinyl"}),
+    "country": lambda df: F.filter_by_country(df, {"UK"}),
+    "role": lambda df: F.filter_by_role(df, {"Main"}),
+    "genres": lambda df: F.filter_by_genres(df, {"Electronic"}),
+    "styles": lambda df: F.filter_by_styles(df, {"House"}),
+    "size": lambda df: F.filter_labels_by_size(df, 2, 5),
+    "label_only": lambda df: F.apply_label_only_mode(df, ["1"], 1, {"a"}),
+    "label_plus_artist": lambda df: F.apply_label_plus_artist_mode(df, ["1"], ["a"]),
+    "artists_only": lambda df: F.apply_artists_only_mode(df, ["a"], 1),
+    "label_window": lambda df: F.filter_labels_by_activity_window(df, 2000, 2010),
+    "artist_window": lambda df: F.filter_artists_by_activity_window(df, 2000, 2010),
+    "min_artist_releases": lambda df: F.filter_by_min_artist_releases(df, 2),
+    "dj_mixes": F.exclude_dj_mixes,
+    "input_overlap": lambda df: F.filter_by_input_overlap(df, {"1": {"a"}}, min_inputs_reached=2),
+}
+
+
+@pytest.mark.parametrize("name", EMPTY_CASES)
+def test_empty_frame_keeps_columns(name):
+    out = EMPTY_CASES[name](EMPTY)
+    assert out.empty
+    assert list(out.columns) == COLS
+
+
+@pytest.mark.parametrize("name", EMPTY_CASES)
+def test_filter_that_empties_keeps_columns(name):
+    df = pd.DataFrame([{"artist_id": "z", "label_id": "9", "label_name": "L", "release_id": "r",
+                        "year": 1990, "format": "CD", "format_descriptions": "Mixed",
+                        "country": "US", "role": "Track", "genres": "Rock", "styles": "Punk"}])
+    out = EMPTY_CASES[name](df)
+    assert out.empty
+    assert list(out.columns) == COLS
+
+
+def test_artists_only_mode_on_empty_frame_from_a_previous_filter():
+    df = F.exclude_dj_mixes(EMPTY)
+    out = F.apply_artists_only_mode(df, ["a"], 1)
+    assert list(out.columns) == COLS
+    assert out["label_id"].tolist() == []

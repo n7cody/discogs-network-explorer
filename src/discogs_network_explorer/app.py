@@ -166,17 +166,21 @@ _db_outdated = _meta is not None and (_meta.get("schema_version") or 0) < SCHEMA
 
 if snapshot_available() and not _db_outdated:
     _db_date = _db_date_label(_meta)
+    _db_variant = str((_meta or {}).get("variant") or "full")
     data_source = st.sidebar.radio(
         "Where results come from",
         options=["snapshot", "api"],
         format_func=_SOURCE_LABELS.get,
         captions=[
-            f"Instant, offline. Discogs database of {_db_date or 'unknown date'}.",
+            f"Instant, offline. Discogs database of {_db_date or 'unknown date'} ({_db_variant})."
+            + (" Label and artist statistics count original releases only."
+               if _db_variant == "trimmed" else ""),
             "Live and current, but slow (about one request per second).",
         ],
     )
 else:
     _db_date = ""
+    _db_variant = ""
     data_source = "api"
     st.sidebar.markdown("**Discogs API**")
     st.sidebar.caption(
@@ -184,13 +188,13 @@ else:
         "Run `dne-db-update` in a terminal to rebuild it."
         if _db_outdated else
         "No local database found. To query an offline copy of Discogs instead, "
-        "run `dne-db-update` in a terminal. The first build takes about 80 minutes "
-        "and needs up to 40 GB of free disk (about 10 GB once built)."
+        "run `dne-db-update` in a terminal. The first build takes up to 80 minutes "
+        "and needs up to 40 GB of free disk (about 4 GB once built)."
     )
 
 B = get_backend(data_source)
 _source_desc = (
-    f"local database (version {_db_date or 'unknown'})" if data_source == "snapshot"
+    f"local database (version {_db_date or 'unknown'}, {_db_variant})" if data_source == "snapshot"
     else "Discogs API"
 )
 

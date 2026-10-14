@@ -24,24 +24,54 @@ def source_dir(tmp_path_factory):
     return d
 
 
+def _stage(source_dir, out, variant, cores=1):
+    from discogs_network_explorer.ingest.parse import IngestOptions, parse_xml
+
+    opts = IngestOptions(variant, cores=cores)
+    for kind in opts.kinds:
+        with gzip.open(source_dir / f"discogs_{DB_DATE}_{kind}.xml.gz", "rb") as f:
+            parse_xml(kind, f, out, opts=opts)
+    return out
+
+
+def _build(staging, db, variant):
+    from discogs_network_explorer.ingest.build import build_snapshot
+    from discogs_network_explorer.ingest.parse import IngestOptions
+
+    build_snapshot(staging, db, db_date=DB_DATE, checksums={"x": "y"}, timings={"parse": 1.0},
+                   opts=IngestOptions(variant))
+    return db
+
+
+@pytest.fixture
+def spawn_safe_main(monkeypatch):
+    """Spawned workers re-run the parent's __main__; AppTest leaves app.py there."""
+    import sys
+    import types
+
+    monkeypatch.setitem(sys.modules, "__main__", types.ModuleType("__main__"))
+
+
 @pytest.fixture(scope="session")
 def staging(source_dir, tmp_path_factory):
-    from discogs_network_explorer.ingest.parse import parse_xml
+    """The fixture parsed as the full variant."""
+    return _stage(source_dir, tmp_path_factory.mktemp("staging"), "full")
 
-    out = tmp_path_factory.mktemp("staging")
-    for kind in KINDS:
-        with gzip.open(source_dir / f"discogs_{DB_DATE}_{kind}.xml.gz", "rb") as f:
-            parse_xml(kind, f, out)
-    return out
+
+@pytest.fixture(scope="session")
+def staging_trimmed(source_dir, tmp_path_factory):
+    return _stage(source_dir, tmp_path_factory.mktemp("staging_trimmed"), "trimmed")
 
 
 @pytest.fixture(scope="session")
 def snapshot(staging, tmp_path_factory):
-    from discogs_network_explorer.ingest.build import build_snapshot
+    """The fixture database, full variant."""
+    return _build(staging, tmp_path_factory.mktemp("db") / "snap.duckdb", "full")
 
-    db = tmp_path_factory.mktemp("db") / "snap.duckdb"
-    build_snapshot(staging, db, db_date=DB_DATE, checksums={"x": "y"}, timings={"parse": 1.0})
-    return db
+
+@pytest.fixture(scope="session")
+def snapshot_trimmed(staging_trimmed, tmp_path_factory):
+    return _build(staging_trimmed, tmp_path_factory.mktemp("db_trimmed") / "snap.duckdb", "trimmed")
 
 
 @pytest.fixture(scope="session")

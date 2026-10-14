@@ -1,24 +1,16 @@
 -- artist_release_roles: one role per (artist, release); Main > Track > Producer > Co-producer > Remix,
 -- and every role on an unofficial release becomes Unofficial
 CREATE TABLE artist_release_roles AS
-WITH credit_roles AS (
-    SELECT release_id,
-           artist_id,
-           lower(trim(unnest(string_split(regexp_replace(role, '\s*\[[^\]]*\]', '', 'g'), ',')))) AS base_role
-    FROM credits
-    WHERE artist_id IS NOT NULL
-),
-candidates AS (
+WITH candidates AS (
     SELECT release_id, artist_id, 'Main' AS role, 1 AS rank FROM release_artists
     UNION ALL
     SELECT release_id, artist_id, 'Track', 2 FROM track_artists
     UNION ALL
     SELECT release_id,
            artist_id,
-           CASE base_role WHEN 'producer' THEN 'Producer' WHEN 'co-producer' THEN 'Co-producer' ELSE 'Remix' END,
-           CASE base_role WHEN 'producer' THEN 3 WHEN 'co-producer' THEN 4 ELSE 5 END
-    FROM credit_roles
-    WHERE base_role IN ('producer', 'co-producer', 'remix')
+           role,
+           CASE role WHEN 'Producer' THEN 3 WHEN 'Co-producer' THEN 4 ELSE 5 END
+    FROM role_credits
 ),
 best AS (
     SELECT release_id, artist_id, arg_min(role, rank) AS role

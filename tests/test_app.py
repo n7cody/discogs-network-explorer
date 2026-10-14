@@ -256,6 +256,39 @@ def test_artist_activity_uses_full_history_in_local_mode(local_app):
     assert set(at.dataframe[0].value["artist_id"].astype(str)) == {"712683"}
 
 
+def test_default_filters_that_empty_the_result_show_a_warning(local_app):
+    at = local_app
+    at.sidebar.selectbox[0].set_value("Artists Only").run()
+    at.sidebar.text_area[1].set_value("712683,3225")
+    _by_label(at.sidebar.number_input, "Min shared artists from input list").set_value(1)
+    at = _run(at, "")
+    assert not at.exception and len(at.dataframe)
+    # 2008 onwards each label has one row; the default Min releases per label (2) drops them all
+    _by_label(at.sidebar.number_input, "Year from").set_value(2008).run()
+    assert not at.exception
+    assert any("All rows were filtered out" in w.value for w in at.warning)
+    assert not at.dataframe
+
+
+# Database variant
+
+def test_data_source_caption_names_variant(env, snapshot, snapshot_trimmed):
+    shutil.copy(snapshot_trimmed, env / "discogs_20261001.duckdb")
+    at = AppTest.from_file(APP, default_timeout=30).run()
+    assert not at.exception
+    caption = str(at.sidebar.radio[0].proto)
+    assert "(trimmed)" in caption and "original releases only" in caption
+    at = _run(at, "99137")
+    assert not at.exception
+    assert _params(at)["data_source"] == "local database (version 2026-10-01, trimmed)"
+
+    local_db.reconnect()
+    shutil.copy(snapshot, env / "discogs_20261001.duckdb")
+    at = AppTest.from_file(APP, default_timeout=30).run()
+    caption = str(at.sidebar.radio[0].proto)
+    assert "(full)" in caption and "original releases only" not in caption
+
+
 # Search parameters recorded in the export
 
 def _params(at):

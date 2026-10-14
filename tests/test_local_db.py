@@ -321,11 +321,12 @@ def test_snapshot_meta_readable_while_connected(snapshot):
     assert read_meta(snapshot)["db_date"] == "20261001"
 
 
-def test_outdated_schema_raises(snapshot, tmp_path):
+@pytest.mark.parametrize("version", [1, 2])
+def test_outdated_schema_raises(snapshot, tmp_path, version):
     copy = tmp_path / "snap.duckdb"
     shutil.copy(snapshot, copy)
     with duckdb.connect(str(copy)) as con:
-        con.execute("UPDATE snapshot_meta SET schema_version = 1")
+        con.execute("UPDATE snapshot_meta SET schema_version = ?", [version])
     local_db.use_snapshot(copy)
     try:
         with pytest.raises(local_db.SnapshotOutdated, match="dne-db-update"):
@@ -342,3 +343,32 @@ def test_missing_snapshot(tmp_path, monkeypatch, snapshot):
             local_db.get_label_name(SEED)
     finally:
         local_db.use_snapshot(snapshot)
+
+
+# Trimmed and full databases answer discovery and dnx queries alike
+
+def _answers(path):
+    local_db.use_snapshot(path)
+    pool = local_db.get_master_artist_list([SEED])
+    rows = sorted(map(repr, local_db.get_master_label_rows(pool)))
+    labels = sorted({r["label_id"] for r in local_db.get_master_label_rows(pool)})
+    return {
+        "pool": pool,
+        "rows": rows,
+        "label_catalogs": [local_db.get_catalog_videos("label", lid) for lid in labels],
+        "artist_catalogs": [local_db.get_catalog_videos("artist", a) for a in pool],
+        "names": [local_db.get_label_name(lid) for lid in labels] + [local_db.get_artist_name(a) for a in pool],
+        "window": local_db.get_artist_window_counts(pool, 2000, 2026),
+    }
+
+
+def test_trimmed_matches_full(snapshot, snapshot_trimmed):
+    try:
+        trimmed = _answers(snapshot_trimmed)
+        full = _answers(snapshot)
+    finally:
+        local_db.use_snapshot(snapshot)
+    assert trimmed["pool"] == SEED_POOL
+    for key in ("pool", "rows", "label_catalogs", "artist_catalogs", "names"):
+        assert trimmed[key] == full[key], key
+    assert all(n <= full["window"][a] for a, n in trimmed["window"].items())
